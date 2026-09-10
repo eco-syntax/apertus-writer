@@ -80,7 +80,7 @@ export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey,
     }
 
     try {
-      const reply = await chat(settings.chat, [{ role: 'system', content: system }, ...history], 1024)
+      const reply = await chat(settings.chat, [{ role: 'system', content: system }, ...history], { maxTokens: 1024 })
       setMessages([...history, { role: 'assistant', content: reply }])
     } catch (err) {
       setMessages([...history, { role: 'assistant', content: `⚠️ Error: ${err}` }])

@@ -71,8 +71,37 @@ turndown.addRule('table', {
   },
 })
 
+// AI placeholder blocks round-trip through markdown as a standalone
+// `[[ai: <description>]]` line. On the way in, such a line is swapped for a
+// raw-HTML paragraph carrying the description in a data attribute, which the
+// aiPlaceholder TipTap node parses; on the way out, a turndown rule below
+// turns the node's <div data-ai-placeholder> back into the marker line.
+const AI_PLACEHOLDER_LINE = /^[ \t]*\[\[ai:[ \t]*(.*?)[ \t]*\]\][ \t]*$/
+
+const escapeAttr = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+// AI placeholder node → `[[ai: <description>]]`. The node's rendered HTML is
+// a <div data-ai-placeholder> wrapping a visible note; the note text is
+// discarded here so only the marker line survives the round trip.
+turndown.addRule('aiPlaceholder', {
+  filter: (node) =>
+    node.nodeType === 1 && (node as HTMLElement).hasAttribute('data-ai-placeholder'),
+  replacement: (_content, node) => {
+    const desc = (node as HTMLElement).getAttribute('data-ai-placeholder') || ''
+    return `\n\n[[ai: ${desc}]]\n\n`
+  },
+})
+
 export function markdownToHtml(md: string): string {
-  return marked.parse(md, { async: false }) as string
+  const pre = md
+    .split('\n')
+    .map((line) => {
+      const m = line.match(AI_PLACEHOLDER_LINE)
+      return m ? `<p data-ai-placeholder="${escapeAttr(m[1])}"></p>` : line
+    })
+    .join('\n')
+  return marked.parse(pre, { async: false }) as string
 }
 
 export function htmlToMarkdown(html: string): string {
