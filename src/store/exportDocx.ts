@@ -3,7 +3,7 @@
 import {
   Document, Packer, Paragraph, TextRun, ExternalHyperlink, ImageRun,
   HeadingLevel, AlignmentType, Table, TableRow, TableCell, WidthType,
-  BorderStyle, ShadingType, convertMillimetersToTwip, LevelFormat,
+  TableLayoutType, BorderStyle, ShadingType, convertMillimetersToTwip, LevelFormat,
 } from 'docx'
 import type { ILevelsOptions } from 'docx'
 import { htmlToBlocks, themeFromVars, type Block, type InlineRun, type ExportTheme } from './exportModel'
@@ -96,8 +96,17 @@ async function blockToDocx(block: Block, t: ExportTheme, numId: { current: numbe
       }))
     }
     case 'table': {
+      const cols = Math.max(
+        block.header.length,
+        ...block.rows.map((r) => r.length),
+        1,
+      )
+      // Letter 8.5in − 2×1in margins = 6.5in = 9360 twip of content width
+      const contentWidthTwip = 9360
+      const columnWidths = Array.from({ length: cols }, () => Math.floor(contentWidthTwip / cols))
       const makeCell = (runs: InlineRun[], isHeader: boolean) => new TableCell({
         borders,
+        width: { size: 100 / cols, type: WidthType.PERCENTAGE },
         shading: isHeader ? { type: ShadingType.CLEAR, fill: t.codeBg } : undefined,
         children: [new Paragraph({ children: textRuns(isHeader ? runs.map((r) => ({ ...r, bold: true })) : runs, t) })],
       })
@@ -108,7 +117,12 @@ async function blockToDocx(block: Block, t: ExportTheme, numId: { current: numbe
       for (const row of block.rows) {
         rows.push(new TableRow({ children: row.map((cell) => makeCell(cell, false)) }))
       }
-      return [new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows })]
+      return [new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        layout: TableLayoutType.FIXED,
+        columnWidths,
+        rows,
+      })]
     }
     case 'image': {
       const img = dataUrlToBytes(block.dataUrl)

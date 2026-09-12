@@ -368,9 +368,16 @@ ipcMain.handle('print-document', async (_event, { html, css }) => {
 function buildPrintableHtml(html, css) {
   return `<!doctype html><html><head><meta charset="utf-8"><style>
     ${css}
+    @page { size: letter; margin: 20mm; }
     body { font-family: var(--doc-font); font-size: var(--doc-font-size);
            color: var(--doc-text-color); background: var(--doc-bg);
            max-width: var(--doc-max-width); margin: 0 auto; padding: 24px; line-height: 1.65; }
+    @media print {
+      body { max-width: 100% !important; padding: 0; }
+      table { table-layout: fixed; word-break: break-word; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+      td, p { overflow-wrap: break-word; }
+    }
     h1,h2,h3,h4 { color: var(--doc-heading-color); }
     a { color: var(--doc-accent); }
     code { font-family: var(--doc-code-font); background: var(--doc-code-bg); padding: 0.15em 0.35em; border-radius: 4px; }
@@ -392,7 +399,7 @@ ipcMain.handle('export-pdf-to', async (_event, { filePath, html, css }) => {
   try {
     win = new BrowserWindow({ show: false, webPreferences: { offscreen: true } })
     await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(fullHtml))
-    const pdf = await win.webContents.printToPDF({ printBackground: true })
+    const pdf = await win.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true })
     fs.writeFileSync(filePath, pdf)
     return { ok: true }
   } catch (err) {
