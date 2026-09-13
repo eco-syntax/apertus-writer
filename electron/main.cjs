@@ -136,11 +136,83 @@ function sessionPath() {
   return path.join(app.getPath('userData'), 'session.json')
 }
 
+// --- Dialog-approved path registry -----------------------------------------
+// The renderer may only read/write files the user has explicitly picked in a
+// native dialog. Provenance is tracked here in main (the renderer cannot add
+// to it); the renderer keeps paths for display/keying but they are not an I/O
+// authorization token. The list is persisted so a document restored from a
+// previous session stays usable after a relaunch.
+const APPROVED_PATHS_ERROR = 'Path not approved for this document'
+
+function approvedPathsPath() {
+  return path.join(app.getPath('userData'), 'approved-paths.json')
+}
+
+let approvedPaths = null
+
+function loadApprovedPaths() {
+  if (approvedPaths) return approvedPaths
+  try {
+    const raw = JSON.parse(fs.readFileSync(approvedPathsPath(), 'utf8'))
+    approvedPaths = new Set(Array.isArray(raw) ? raw.filter((p) => typeof p === 'string') : [])
+  } catch {
+    approvedPaths = new Set()
+  }
+  return approvedPaths
+}
+
+function persistApprovedPaths() {
+  try {
+    fs.writeFileSync(approvedPathsPath(), JSON.stringify([...loadApprovedPaths()]), 'utf8')
+  } catch {
+    // Best-effort: if the list can't be persisted the running app still works;
+    // after a relaunch the user simply has to pick the file in a dialog again.
+  }
+}
+
+// Resolve a renderer-supplied path to the canonical form used for allowlist
+// comparisons, or null when it is empty / not a string / contains a NUL. On
+// Windows, lowercase so case-spoofing can't defeat the comparison.
+function normalizePath(filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0 || filePath.includes('\0')) return null
+  const resolved = path.resolve(filePath)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+function isApproved(filePath) {
+  const resolved = normalizePath(filePath)
+  return resolved !== null && loadApprovedPaths().has(resolved)
+}
+
+function approve(filePath) {
+  const resolved = normalizePath(filePath)
+  if (resolved === null) return
+  const set = loadApprovedPaths()
+  if (set.has(resolved)) return
+  set.add(resolved)
+  persistApprovedPaths()
+}
+
+// Derive the sidecar .css path for a document, rejecting anything that isn't a
+// .css file sitting in the same directory as the (approved) document.
+function sidecarPath(filePath) {
+  const cssPath = filePath.replace(/\.(md|markdown|txt)$/i, '.css')
+  if (!/\.css$/i.test(cssPath)) return null
+  const docDir = normalizePath(path.dirname(filePath))
+  const cssDir = normalizePath(path.dirname(cssPath))
+  if (!docDir || !cssDir || docDir !== cssDir) return null
+  return cssPath
+}
+
 // IPC: persist the current working document. → { ok, error? }
 // args: { docName, filePath, content }
 ipcMain.handle('session-save', async (_event, { docName, filePath, content }) => {
   try {
-    const data = JSON.stringify({ docName, filePath, content })
+    // Never persist an unapproved path: a compromised renderer must not be able
+    // to plant a path that becomes "trusted" after a restart.
+    let safePath = null
+    if (filePath !== null && filePath !== undefined) safePath = isApproved(filePath) ? filePath : null
+    const data = JSON.stringify({ docName, filePath: safePath, content })
     fs.writeFileSync(sessionPath(), data, 'utf8')
     return { ok: true }
   } catch (err) {
@@ -154,11 +226,18 @@ ipcMain.handle('session-load', async () => {
     const raw = fs.readFileSync(sessionPath(), 'utf8')
     const session = JSON.parse(raw)
     if (typeof session.content !== 'string') return { ok: true, session: null }
+    // Restore the path only if it is still in the approved registry; a
+    // hand-edited session.json can't smuggle in a path that bypasses dialogs.
+    let filePath = null
+    if (typeof session.filePath === 'string' && isApproved(session.filePath)) {
+      approve(session.filePath)
+      filePath = session.filePath
+    }
     return {
       ok: true,
       session: {
         docName: typeof session.docName === 'string' ? session.docName : 'untitled.md',
-        filePath: typeof session.filePath === 'string' || session.filePath === null ? session.filePath : null,
+        filePath,
         content: session.content,
       },
     }
@@ -266,12 +345,17 @@ ipcMain.handle('choose-open-path', async () => {
     filters: [{ name: 'Markdown/Text', extensions: ['md', 'markdown', 'txt'] }],
   })
   if (canceled || filePaths.length === 0) return { canceled: true }
+  approve(filePaths[0])
   return { canceled: false, filePath: filePaths[0] }
 })
 
 // IPC: read a UTF-8 text file. → { ok, content?, error? }
 ipcMain.handle('read-file', async (_event, { filePath }) => {
   try {
+    // Reads are limited to dialog-approved markdown/text documents.
+    if (!isApproved(filePath) || !/\.(md|markdown|txt)$/i.test(filePath)) {
+      return { ok: false, error: APPROVED_PATHS_ERROR }
+    }
     return { ok: true, content: fs.readFileSync(filePath, 'utf8') }
   } catch (err) {
     return { ok: false, error: String(err) }
@@ -291,6 +375,7 @@ ipcMain.handle('choose-export-path', async (_event, { docName }) => {
     ],
   })
   if (canceled || !filePath) return { canceled: true }
+  approve(filePath)
   const format = (filePath.match(/\.(docx|odt|pdf)$/i)?.[1] || 'docx').toLowerCase()
   return { canceled: false, filePath, format }
 })
@@ -305,12 +390,14 @@ ipcMain.handle('choose-save-path', async (_event, { docName }) => {
     ],
   })
   if (canceled || !filePath) return { canceled: true }
+  approve(filePath)
   return { canceled: false, filePath }
 })
 
 // IPC: write base64-encoded bytes to a file. → { ok, error? }
 ipcMain.handle('write-file', async (_event, { filePath, base64 }) => {
   try {
+    if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
     fs.writeFileSync(filePath, Buffer.from(base64, 'base64'))
     return { ok: true }
   } catch (err) {
@@ -323,7 +410,9 @@ ipcMain.handle('write-file', async (_event, { filePath, base64 }) => {
 // extension with .css. → { ok, error? }
 ipcMain.handle('write-sidecar', async (_event, { filePath, css }) => {
   try {
-    const cssPath = filePath.replace(/\.(md|markdown|txt)$/i, '.css')
+    if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
+    const cssPath = sidecarPath(filePath)
+    if (!cssPath) return { ok: false, error: APPROVED_PATHS_ERROR }
     fs.writeFileSync(cssPath, css, 'utf8')
     return { ok: true }
   } catch (err) {
@@ -336,7 +425,9 @@ ipcMain.handle('write-sidecar', async (_event, { filePath, css }) => {
 // opens with the default theme). → { ok, css? }
 ipcMain.handle('read-sidecar', async (_event, { filePath }) => {
   try {
-    const cssPath = filePath.replace(/\.(md|markdown|txt)$/i, '.css')
+    if (!isApproved(filePath)) return { ok: false, css: null }
+    const cssPath = sidecarPath(filePath)
+    if (!cssPath) return { ok: false, css: null }
     if (!fs.existsSync(cssPath)) return { ok: true, css: null }
     return { ok: true, css: fs.readFileSync(cssPath, 'utf8') }
   } catch (err) {
@@ -387,6 +478,7 @@ function buildPrintableHtml(html, css) {
 // IPC: render themed HTML to a PDF file via printToPDF (preserves CSS exactly).
 // args: { filePath, html, css } → { ok, error? }
 ipcMain.handle('export-pdf-to', async (_event, { filePath, html, css }) => {
+  if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
   const fullHtml = buildPrintableHtml(html, css)
   let win = null
   try {
