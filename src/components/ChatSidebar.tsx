@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from 'react'
-import { marked } from 'marked'
 import { chat, type ChatMessage } from '../api/openai'
+import { renderMarkdown } from '../api/markdown'
 import type { Settings } from '../store/settings'
 import { useContextItems, removeContextItem } from '../store/context'
 import { attachFiles, attachUrl } from '../store/summarize'
@@ -130,7 +130,7 @@ export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey,
             {m.role === 'assistant' ? (
               <div
                 className="chat-text markdown"
-                dangerouslySetInnerHTML={{ __html: marked.parse(m.content, { async: false }) as string }}
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }}
               />
             ) : (
               <div className="chat-text">{m.content}</div>
