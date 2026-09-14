@@ -1,12 +1,11 @@
 // ODT export: builds a .odt (zip of XML) with named styles derived from the
 // active theme, so LibreOffice/OpenOffice renders it like the editor.
 import JSZip from 'jszip'
-import { htmlToBlocks, themeFromVars, type Block, type InlineRun, type ExportTheme } from './exportModel'
+import { htmlToBlocks, themeFromVars, HEADING_SCALE, type Block, type InlineRun, type ExportTheme } from './exportModel'
 import type { ThemeVars } from '../components/StylePanel'
 
-const HEADING_SCALE = [2, 1.5, 1.25, 1.1]
 const esc = (s: string) =>
-  s.replace(/&/g, '&' + 'amp;').replace(/</g, '&' + 'lt;').replace(/>/g, '&' + 'gt;').replace(/"/g, '&' + 'quot;')
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
 const pt = (n: number) => `${n.toFixed(1)}pt`
 const hex = (h: string) => `#${h}`
