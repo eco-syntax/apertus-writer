@@ -1,3 +1,4 @@
+import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import TurndownService from 'turndown'
 
@@ -73,6 +74,12 @@ turndown.addRule('table', {
 
 export function markdownToHtml(md: string): string {
   return marked.parse(md, { async: false }) as string
+}
+
+// Render markdown from untrusted sources (e.g. LLM replies) to HTML with all
+// script vectors stripped: event handlers, javascript: URLs, script/iframe, etc.
+export function renderMarkdown(md: string): string {
+  return DOMPurify.sanitize(marked.parse(md, { async: false }) as string)
 }
 
 export function htmlToMarkdown(html: string): string {
