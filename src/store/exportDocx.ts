@@ -6,11 +6,10 @@ import {
   BorderStyle, ShadingType, convertMillimetersToTwip, LevelFormat,
 } from 'docx'
 import type { ILevelsOptions } from 'docx'
-import { htmlToBlocks, themeFromVars, type Block, type InlineRun, type ExportTheme } from './exportModel'
+import { htmlToBlocks, themeFromVars, HEADING_SCALE, type Block, type InlineRun, type ExportTheme } from './exportModel'
 import type { ThemeVars } from '../components/StylePanel'
 
 const halfPt = (pt: number) => Math.round(pt * 2)
-const HEADING_SCALE = [2, 1.5, 1.25, 1.1]
 
 function textRuns(runs: InlineRun[], t: ExportTheme, opts: { heading?: boolean } = {}): (TextRun | ExternalHyperlink)[] {
   const color = opts.heading ? t.headingColor : t.textColor

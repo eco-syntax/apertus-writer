@@ -3,6 +3,9 @@
 // builders each render these blocks with the active CSS theme applied.
 import type { ThemeVars } from '../components/StylePanel'
 
+// Heading font-size multiplier per level (1–4), shared by the DOCX/ODT exporters.
+export const HEADING_SCALE = [2, 1.5, 1.25, 1.1]
+
 export interface InlineRun {
   text: string
   bold?: boolean
