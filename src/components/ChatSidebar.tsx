@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from 'react'
 import { chat, type ChatMessage } from '../api/openai'
-import { renderMarkdown } from '../api/markdown'
+import { renderMarkdown } from '../store/markdown'
 import type { Settings } from '../store/settings'
 import { useContextItems, removeContextItem } from '../store/context'
 import { attachFiles, attachUrl } from '../store/summarize'
