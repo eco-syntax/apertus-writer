@@ -115,10 +115,30 @@ function createWindow() {
     if (items.length > 0) Menu.buildFromTemplate(items).popup()
   })
 
-  // Open external links in the system browser
+  // Open external links in the system browser, but only http(s) URLs.
+  // shell.openExternal hands the URL straight to the OS, where protocols like
+  // file:, ms-msdt: or search-ms: are documented RCE/launch vectors on
+  // Windows — so anything outside http(s) is silently denied.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        shell.openExternal(parsed.toString())
+      }
+    } catch {
+      // Unparseable or non-http(s) URL — deny.
+    }
     return { action: 'deny' }
+  })
+
+  // The renderer is a self-contained SPA that never navigates. Lock the main
+  // frame to its own URL so a crafted link (or prompt-injected model output)
+  // can't navigate the whole window to an attacker-controlled page running
+  // with the app's preload privileges. URLs are normalized (e.g. a trailing
+  // slash) so the dev server's own redirects still count as the same page.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const norm = (u) => { try { return new URL(u).toString() } catch { return null } }
+    if (norm(url) !== norm(mainWindow.webContents.getURL())) event.preventDefault()
   })
 
   if (isDev) {
