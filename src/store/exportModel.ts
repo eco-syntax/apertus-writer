@@ -3,6 +3,9 @@
 // builders each render these blocks with the active CSS theme applied.
 import type { ThemeVars } from '../components/StylePanel'
 
+// Heading font-size multiplier per level (1–4), shared by the DOCX/ODT exporters.
+export const HEADING_SCALE = [2, 1.5, 1.25, 1.1]
+
 export interface InlineRun {
   text: string
   bold?: boolean
@@ -76,14 +79,22 @@ function parseInline(node: Node, run: Omit<InlineRun, 'text'>, out: InlineRun[])
   for (const child of Array.from(node.childNodes)) parseInline(child, next, out)
 }
 
+// Parse a `data:image/<type>;base64,...` URL into raw bytes + image type.
+// Shared by the DOCX and ODT exporters.
+export function parseImageDataUrl(dataUrl: string):
+  { data: Uint8Array; ext: 'png' | 'jpg' | 'gif' | 'bmp' } | null {
+  const m = dataUrl.match(/^data:image\/(png|jpe?g|gif|bmp);base64,(.+)$/)
+  if (!m) return null
+  const bin = atob(m[2])
+  const data = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i)
+  return { data, ext: m[1].toLowerCase() === 'jpeg' ? 'jpg' : (m[1].toLowerCase() as 'png' | 'jpg' | 'gif' | 'bmp') }
+}
+
 function inlineOf(el: Element): InlineRun[] {
   const out: InlineRun[] = []
   for (const child of Array.from(el.childNodes)) parseInline(child, {}, out)
   return out
-}
-
-function cellText(el: Element): string {
-  return el.textContent ?? ''
 }
 
 export function htmlToBlocks(html: string): Block[] {
@@ -114,7 +125,7 @@ export function htmlToBlocks(html: string): Block[] {
         blocks.push({ kind: 'list', ordered: tag === 'ol', items })
       } else if (tag === 'table') {
         const headerRow = node.querySelector('thead tr, tr')
-        const header = headerRow ? Array.from(headerRow.querySelectorAll('th,td')).map(cellText) : []
+        const header = headerRow ? Array.from(headerRow.querySelectorAll('th,td')).map((el) => el.textContent ?? '') : []
         const bodyRows = Array.from(node.querySelectorAll('tbody tr')).length
           ? Array.from(node.querySelectorAll('tbody tr'))
           : Array.from(node.querySelectorAll('tr')).slice(1)

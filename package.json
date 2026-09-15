@@ -9,7 +9,6 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "electron": "set ELECTRON_RUN_AS_NODE=&& electron .",
     "dev:electron": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && set ELECTRON_RUN_AS_NODE=&& electron .\"",
     "dist": "npm run build && electron-builder"
   },
@@ -48,6 +47,7 @@
     "@tiptap/react": "^2.14.0",
     "@tiptap/starter-kit": "^2.14.0",
     "docx": "^9.7.1",
+    "dompurify": "^3.4.15",
     "jszip": "^3.10.1",
     "marked": "^15.0.0",
     "pdfjs-dist": "^4.10.38",

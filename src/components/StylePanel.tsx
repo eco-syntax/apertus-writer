@@ -178,7 +178,14 @@ export function cssToTheme(css: string): ThemeVars {
   const vars = { ...DEFAULT_THEME }
   for (const key of Object.keys(vars) as (keyof ThemeVars)[]) {
     const m = css.match(new RegExp(`${key}\\s*:\\s*([^;]+);`))
-    if (m) vars[key] = m[1].trim()
+    if (!m) continue
+    const value = m[1].trim()
+    // Reject values containing `<`/`>`: a malicious sidecar .css can't break
+    // out of a <style> block (e.g. `--doc-bg: x}</style><script>...`) when the
+    // value is later re-emitted into print/export HTML. Legitimate theme values
+    // (colors, sizes, font stacks) never contain angle brackets.
+    if (/[<>]/.test(value)) continue
+    vars[key] = value
   }
   return vars
 }
