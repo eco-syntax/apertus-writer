@@ -15,7 +15,7 @@ import ChatSidebar from './components/ChatSidebar'
 import SettingsDialog from './components/SettingsDialog'
 import { Autocomplete } from './components/Autocomplete'
 import { markdownToHtml, htmlToMarkdown } from './store/markdown'
-import { loadSettings, saveSettings, type Settings } from './store/settings'
+import { loadSettings, saveSettings, loadSecretKeys, type Settings } from './store/settings'
 import { getBridge, blobToBase64 } from './store/bridge'
 import { getContextItems, useContextItems, setContextItems } from './store/context'
 import ContextPanel from './components/ContextPanel'
@@ -72,6 +72,27 @@ export default function App() {
   const settingsRef = useRef(settings)
   settingsRef.current = settings
 
+  // Load API keys from the main-process safeStorage store (encrypted at rest)
+  // and merge them into settings. Migrates any legacy plaintext keys left in
+  // localStorage on first load: persists them to safeStorage and strips them
+  // from localStorage via saveSettings.
+  useEffect(() => {
+    let cancelled = false
+    void loadSecretKeys().then((keys) => {
+      if (cancelled) return
+      const prev = settingsRef.current
+      const next: Settings = {
+        ...prev,
+        autocomplete: { ...prev.autocomplete, apiKey: keys.autocomplete ?? prev.autocomplete.apiKey },
+        chat: { ...prev.chat, apiKey: keys.chat ?? prev.chat.apiKey },
+      }
+      setSettings(next)
+      const migrated = (!keys.autocomplete && prev.autocomplete.apiKey) || (!keys.chat && prev.chat.apiKey)
+      if (getBridge()?.secretSave && migrated) saveSettings(next)
+    })
+    return () => { cancelled = true }
+  }, [])
+
   const [aiError, setAiError] = useState<string | null>(null)
 
   // --- Session persistence ---------------------------------------------------
@@ -80,15 +101,9 @@ export default function App() {
   // reopens whatever you were working on instead of the welcome page. Lives in
   // the Electron main process (plain-browser sessions are unaffected).
   // Refs mirror the state values the debounced save needs at fire time —
-  // closure-captured values would go stale.
-  const docNameRef = useRef(docName)
-  docNameRef.current = docName
-  const filePathRef = useRef(filePath)
-  filePathRef.current = filePath
-  const codeViewRef = useRef(codeView)
-  codeViewRef.current = codeView
-  const codeTextRef = useRef(codeText)
-  codeTextRef.current = codeText
+  // closure-captured values would go stale. One object keeps them in sync.
+  const sessionRef = useRef({ docName, filePath, codeView, codeText })
+  sessionRef.current = { docName, filePath, codeView, codeText }
   const editorRef = useRef<Editor | null>(null)
   const sessionTimerRef = useRef<number | null>(null)
 
@@ -96,8 +111,9 @@ export default function App() {
     const bridge = getBridge()
     const ed = editorRef.current
     if (!bridge?.sessionSave || !ed) return
-    const content = codeViewRef.current ? codeTextRef.current : htmlToMarkdown(ed.getHTML())
-    void bridge.sessionSave({ docName: docNameRef.current, filePath: filePathRef.current, content })
+    const s = sessionRef.current
+    const content = s.codeView ? s.codeText : htmlToMarkdown(ed.getHTML())
+    void bridge.sessionSave({ docName: s.docName, filePath: s.filePath, content })
   }, [])
 
   const scheduleSessionSave = useCallback(() => {
@@ -267,12 +283,10 @@ export default function App() {
       setCodeText(htmlToMarkdown(editor.getHTML()))
       setCodeView(true)
     } else {
-      const before = getMarkdown()
-      if (codeText !== before) setDirty(true)
       editor?.commands.setContent(markdownToHtml(codeText))
       setCodeView(false)
     }
-  }, [codeView, codeText, editor, getMarkdown])
+  }, [codeView, codeText, editor])
 
   // File operations
   const [confirmNew, setConfirmNew] = useState(false)
@@ -354,8 +368,7 @@ export default function App() {
         if (choice.canceled || !choice.filePath) return
         path = choice.filePath
       }
-      const base64 = await blobToBase64(new Blob([md], { type: 'text/markdown' }))
-      const res = await bridge.writeFile({ filePath: path, base64 })
+      const res = await bridge.writeFile({ filePath: path, text: md })
       if (!res.ok) { flash(`Save failed: ${res.error}`); return }
       setFilePath(path)
       setDocName(path.split(/[\\/]/).pop() || path)
@@ -371,22 +384,13 @@ export default function App() {
       }
       return
     }
-    const blob = new Blob([md], { type: 'text/markdown' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = docName
-    a.click()
-    URL.revokeObjectURL(a.href)
+    downloadBlob(new Blob([md], { type: 'text/markdown' }), docName)
     setDirty(false)
   }
 
   const saveTheme = () => {
-    const blob = new Blob([themeToCss(theme)], { type: 'text/css' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `${themeName.toLowerCase().replace(/\s+/g, '-')}.css`
-    a.click()
-    URL.revokeObjectURL(a.href)
+    downloadBlob(new Blob([themeToCss(theme)], { type: 'text/css' }),
+      `${themeName.toLowerCase().replace(/\s+/g, '-')}.css`)
   }
 
   const loadThemeFile = async (file: File) => {

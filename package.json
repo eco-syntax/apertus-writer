@@ -9,7 +9,6 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "electron": "set ELECTRON_RUN_AS_NODE=&& electron .",
     "dev:electron": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && set ELECTRON_RUN_AS_NODE=&& electron .\"",
     "dist": "npm run build && electron-builder"
   },

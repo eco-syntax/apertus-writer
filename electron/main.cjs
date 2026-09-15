@@ -4,6 +4,7 @@
 // endpoint (local servers, third-party hosted APIs) without proxies.
 const { app, BrowserWindow, ipcMain, shell, dialog, Menu } = require('electron')
 const path = require('path')
+const dns = require('dns').promises
 const fs = require('fs')
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
@@ -131,14 +132,15 @@ function createWindow() {
     return { action: 'deny' }
   })
 
-  // The renderer is a self-contained SPA that never navigates. Lock the main
-  // frame to its own URL so a crafted link (or prompt-injected model output)
-  // can't navigate the whole window to an attacker-controlled page running
-  // with the app's preload privileges. URLs are normalized (e.g. a trailing
-  // slash) so the dev server's own redirects still count as the same page.
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    const norm = (u) => { try { return new URL(u).toString() } catch { return null } }
-    if (norm(url) !== norm(mainWindow.webContents.getURL())) event.preventDefault()
+  // Navigation guard: the privileged preload bridge is re-injected into every
+  // page loaded in this window, so a link click (or prompt-injected <a>) that
+  // navigates the window to a remote origin would hand window.aiBridge to an
+  // attacker. Only allow navigation to the app's own origin (the dev server in
+  // dev, file:// in the packaged app); everything else is denied. Links are
+  // routed to the system browser via the open-external handler above.
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    const allowed = isDev ? DEV_URL : 'file://'
+    if (!url.startsWith(allowed)) e.preventDefault()
   })
 
   if (isDev) {
@@ -266,88 +268,124 @@ ipcMain.handle('session-load', async () => {
   }
 })
 
-// Chat history: one message thread per document, keyed by filePath (or
-// 'untitled:<docName>' for never-saved docs). Stored as a JSON map in userData
-// so a document's chat is restored when it is reopened. Mirrors session.json.
-function chatsPath() {
-  return path.join(app.getPath('userData'), 'chats.json')
-}
-
-function readChats() {
-  try {
-    return JSON.parse(fs.readFileSync(chatsPath(), 'utf8')) || {}
-  } catch {
-    return {}
+// One JSON map per file in userData: a `key → array` store (chats.json,
+// context.json). `valueKey` is the property name the renderer uses over IPC
+// (`messages` for chat, `items` for context), so save/load return that shape.
+function jsonStore(filename, valueKey) {
+  const file = () => path.join(app.getPath('userData'), filename)
+  function read() {
+    try {
+      return JSON.parse(fs.readFileSync(file(), 'utf8')) || {}
+    } catch {
+      return {}
+    }
+  }
+  return {
+    save: async (_event, args) => {
+      try {
+        const store = read()
+        const items = args[valueKey]
+        if (Array.isArray(items) && items.length === 0) delete store[args.key]
+        else store[args.key] = items
+        fs.writeFileSync(file(), JSON.stringify(store), 'utf8')
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: String(err) }
+      }
+    },
+    load: async (_event, args) => {
+      try {
+        const store = read()
+        const items = Array.isArray(store[args.key]) ? store[args.key] : []
+        return { ok: true, [valueKey]: items }
+      } catch {
+        return { ok: true, [valueKey]: [] }
+      }
+    },
   }
 }
 
-// IPC: persist a document's chat thread. args: { key, messages } → { ok }
-ipcMain.handle('chat-save', async (_event, { key, messages }) => {
+const chats = jsonStore('chats.json', 'messages')
+const context = jsonStore('context.json', 'items')
+ipcMain.handle('chat-save', chats.save)
+ipcMain.handle('chat-load', chats.load)
+ipcMain.handle('context-save', context.save)
+ipcMain.handle('context-load', context.load)
+
+// --- Secret store (API keys) ----------------------------------------------
+// LLM API keys are persisted with Electron safeStorage, which encrypts with
+// the OS keychain (DPAPI on Windows), so they are not left in plaintext in the
+// renderer's localStorage LevelDB on disk. The renderer holds non-secret
+// settings in localStorage and fetches/merges the keys through here at runtime.
+const { safeStorage } = require('electron')
+function secretsFile() { return path.join(app.getPath('userData'), 'secrets.enc') }
+
+ipcMain.handle('secret-load', async () => {
   try {
-    const store = readChats()
-    if (Array.isArray(messages) && messages.length === 0) delete store[key]
-    else store[key] = messages
-    fs.writeFileSync(chatsPath(), JSON.stringify(store), 'utf8')
-    return { ok: true }
+    const available = safeStorage.isEncryptionAvailable()
+    if (!available) return { ok: true, secrets: {}, available: false }
+    const buf = fs.readFileSync(secretsFile())
+    const json = safeStorage.decryptString(buf)
+    return { ok: true, secrets: JSON.parse(json || '{}'), available: true }
+  } catch { return { ok: true, secrets: {}, available: safeStorage.isEncryptionAvailable() } }
+})
+
+ipcMain.handle('secret-save', async (_event, { secrets }) => {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, available: false }
+    fs.writeFileSync(secretsFile(), safeStorage.encryptString(JSON.stringify(secrets || {})))
+    return { ok: true, available: true }
   } catch (err) {
-    return { ok: false, error: String(err) }
+    return { ok: false, error: String(err), available: true }
   }
 })
 
-// IPC: read a document's chat thread. args: { key } → { ok, messages }
-ipcMain.handle('chat-load', async (_event, { key }) => {
-  try {
-    const store = readChats()
-    const messages = Array.isArray(store[key]) ? store[key] : []
-    return { ok: true, messages }
-  } catch {
-    return { ok: true, messages: [] }
-  }
-})
-
-// Reference context (attached files/URLs): one set per document, keyed like
-// chat history. Stored as a JSON map in userData so a document's attachments
-// are restored when it is reopened. Mirrors chats.json.
-function contextPath() {
-  return path.join(app.getPath('userData'), 'context.json')
-}
-
-function readContextStore() {
-  try {
-    return JSON.parse(fs.readFileSync(contextPath(), 'utf8')) || {}
-  } catch {
-    return {}
-  }
-}
-
-// IPC: persist a document's reference context. args: { key, items } → { ok }
-ipcMain.handle('context-save', async (_event, { key, items }) => {
-  try {
-    const store = readContextStore()
-    if (Array.isArray(items) && items.length === 0) delete store[key]
-    else store[key] = items
-    fs.writeFileSync(contextPath(), JSON.stringify(store), 'utf8')
-    return { ok: true }
-  } catch (err) {
-    return { ok: false, error: String(err) }
-  }
-})
-
-// IPC: read a document's reference context. args: { key } → { ok, items }
-ipcMain.handle('context-load', async (_event, { key }) => {
-  try {
-    const store = readContextStore()
-    const items = Array.isArray(store[key]) ? store[key] : []
-    return { ok: true, items }
-  } catch {
-    return { ok: true, items: [] }
-  }
+// IPC: open an external link in the system browser. Only http/https URLs are
+// allowed — guards against javascript:/file:/custom-protocol handlers being
+// handed to the OS. Used by chat link clicks so they open externally instead
+// of navigating (and exposing the preload bridge to) the app window.
+ipcMain.handle('open-external', async (_event, { url }) => {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return
+  try { await shell.openExternal(url) } catch { /* best-effort */ }
 })
 
 // IPC: perform an HTTP request on behalf of the renderer.
 // args: { url, method, headers, body } → { ok, status, statusText, body }
+// Validate a renderer-supplied request URL to limit the SSRF surface of the
+// main-process HTTP proxy. Allows http/https only, GET/POST only, and rejects
+// hostnames that resolve to the link-local range 169.254.0.0/16 (the cloud
+// instance-metadata service) before fetching.
+// ponytail: cannot block all private/loopback ranges — the app's legitimate
+// use is arbitrary OpenAI-compatible endpoints, including localhost/LAN
+// servers, so only the credential-exfil vector (link-local metadata) is
+// blocked. DNS rebinding / TOCTOU between resolve and fetch remains a ceiling;
+// a full SSRF fix would need an endpoint allowlist, which is a product call.
+const BLOCKED_HOST_RE = /^169\.254\./
+async function assertSafeRequestUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') throw new Error('Invalid URL')
+  let parsed
+  try { parsed = new URL(rawUrl) } catch { throw new Error('Invalid URL') }
+  if (!/^https?:$/.test(parsed.protocol)) throw new Error('Blocked scheme')
+  const host = parsed.hostname
+  // IP-literal hosts: block the metadata range directly.
+  if (BLOCKED_HOST_RE.test(host)) throw new Error('Blocked host')
+  // Hostnames: resolve and reject if any address is link-local.
+  try {
+    const looked = await dns.lookup(host, { all: true })
+    if (looked.some((a) => BLOCKED_HOST_RE.test(a.address))) throw new Error('Blocked host')
+  } catch (e) {
+    // lookup failures (e.g. IPv6-only / non-resolvable) are surfaced by fetch
+    // below; only our explicit block should reject here.
+    if (String(e) === 'Error: Blocked host') throw e
+  }
+}
+
 ipcMain.handle('ai-request', async (_event, { url, method, headers, body }) => {
   try {
+    await assertSafeRequestUrl(url)
+    if (method !== undefined && method !== 'GET' && method !== 'POST') {
+      return { ok: false, status: 0, statusText: 'Blocked method', body: '' }
+    }
     const res = await fetch(url, { method, headers, body })
     const text = await res.text()
     return { ok: res.ok, status: res.status, statusText: res.statusText, body: text }
@@ -414,11 +452,13 @@ ipcMain.handle('choose-save-path', async (_event, { docName }) => {
   return { canceled: false, filePath }
 })
 
-// IPC: write base64-encoded bytes to a file. → { ok, error? }
-ipcMain.handle('write-file', async (_event, { filePath, base64 }) => {
+// IPC: write bytes/text to a file. Text saves pass `text` (UTF-8, no base64
+// round-trip); binary exports pass `base64`. → { ok, error? }
+ipcMain.handle('write-file', async (_event, { filePath, base64, text }) => {
   try {
     if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
-    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'))
+    if (typeof text === 'string') fs.writeFileSync(filePath, text, 'utf8')
+    else fs.writeFileSync(filePath, Buffer.from(base64, 'base64'))
     return { ok: true }
   } catch (err) {
     return { ok: false, error: String(err) }
@@ -477,8 +517,17 @@ ipcMain.handle('print-document', async (_event, { html, css }) => {
 })
 
 function buildPrintableHtml(html, css) {
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
-    ${css}
+  // Defense in depth: theme CSS comes from a (possibly untrusted) sidecar .css
+  // and is already angle-bracket-rejected on load (cssToTheme); strip any stray
+  // `<` here too so it can never close the <style> block. CSS has no legitimate
+  // use for `<`.
+  const safeCss = css.replace(/</g, '')
+  // CSP blocks any script in the offscreen data-URL document (theme values,
+  // document HTML) — print/PDF only needs styles + the body markup.
+  return `<!doctype html><html><head><meta charset="utf-8">` +
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">` +
+    `<style>
+    ${safeCss}
     body { font-family: var(--doc-font); font-size: var(--doc-font-size);
            color: var(--doc-text-color); background: var(--doc-bg);
            max-width: var(--doc-max-width); margin: 0 auto; padding: 24px; line-height: 1.65; }

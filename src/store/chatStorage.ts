@@ -12,59 +12,65 @@ export function chatKey(filePath: string | null, docName: string): string {
 const PREFIX = 'apertus-writer-chat:'
 const CONTEXT_PREFIX = 'apertus-writer-context:'
 
-export async function loadChat(key: string): Promise<ChatMessage[]> {
-  const bridge = getBridge()
-  if (bridge?.chatLoad) {
-    const res = await bridge.chatLoad({ key })
-    return res.ok ? (res.messages as ChatMessage[]) : []
-  }
-  try {
-    const raw = localStorage.getItem(PREFIX + key)
-    return raw ? (JSON.parse(raw) as ChatMessage[]) : []
-  } catch {
-    return []
+// One store for a JSON-array-per-key value: in Electron the value is read/
+// written through a named bridge method; otherwise it falls back to
+// localStorage under `prefix`. `bridgeLoad`/`bridgeSave` are bound once at
+// module load (the preload bridge is present before the renderer bundle runs).
+function makeStore<T>(
+  prefix: string,
+  bridgeLoad?: (key: string) => Promise<T[]>,
+  bridgeSave?: (key: string, value: T[]) => void,
+) {
+  return {
+    async load(key: string): Promise<T[]> {
+      if (bridgeLoad) {
+        try { return await bridgeLoad(key) } catch { return [] }
+      }
+      try {
+        const raw = localStorage.getItem(prefix + key)
+        return raw ? (JSON.parse(raw) as T[]) : []
+      } catch {
+        return []
+      }
+    },
+    save(key: string, value: T[]): void {
+      if (bridgeSave) { bridgeSave(key, value); return }
+      try { localStorage.setItem(prefix + key, JSON.stringify(value)) } catch { /* quota / private mode */ }
+    },
   }
 }
 
-export function saveChat(key: string, messages: ChatMessage[]): void {
-  const bridge = getBridge()
-  if (bridge?.chatSave) {
-    void bridge.chatSave({ key, messages })
-    return
-  }
-  try {
-    localStorage.setItem(PREFIX + key, JSON.stringify(messages))
-  } catch { /* ignore quota / private mode */ }
-}
+const chatLoad = getBridge()?.chatLoad
+const chatSave = getBridge()?.chatSave
+const chatStore = makeStore<ChatMessage>(
+  PREFIX,
+  chatLoad && (async (key) => {
+    const res = await chatLoad({ key })
+    return res.ok ? (res.messages as ChatMessage[]) : []
+  }),
+  chatSave && ((key, value) => { void chatSave({ key, messages: value }) }),
+)
+
+const contextLoad = getBridge()?.contextLoad
+const contextSave = getBridge()?.contextSave
+const contextStore = makeStore<ExtraContext>(
+  CONTEXT_PREFIX,
+  contextLoad && (async (key) => {
+    const res = await contextLoad({ key })
+    return res.ok ? (res.items as ExtraContext[]) : []
+  }),
+  contextSave && ((key, value) => { void contextSave({ key, items: value }) }),
+)
+
+export const loadChat = (key: string) => chatStore.load(key)
+export const saveChat = (key: string, messages: ChatMessage[]) => chatStore.save(key, messages)
 
 export async function loadContext(key: string): Promise<ExtraContext[]> {
-  const bridge = getBridge()
-  let raw: ExtraContext[]
-  if (bridge?.contextLoad) {
-    const res = await bridge.contextLoad({ key })
-    raw = res.ok ? (res.items as ExtraContext[]) : []
-  } else {
-    try {
-      const stored = localStorage.getItem(CONTEXT_PREFIX + key)
-      raw = stored ? (JSON.parse(stored) as ExtraContext[]) : []
-    } catch {
-      raw = []
-    }
-  }
+  const raw = await contextStore.load(key)
   // A summary of undefined means summarization was still pending when the item
   // was saved; on restore we won't re-run it, so treat as "no summary" ('')
   // rather than leaving the chip stuck on ⏳ forever.
   return raw.map((it) => ({ ...it, summary: it.summary === undefined ? '' : it.summary }))
 }
 
-export function saveContext(key: string, items: ExtraContext[]): void {
-  const bridge = getBridge()
-  if (bridge?.contextSave) {
-    void bridge.contextSave({ key, items })
-    return
-  }
-  try {
-    localStorage.setItem(CONTEXT_PREFIX + key, JSON.stringify(items))
-  } catch { /* ignore quota / private mode */ }
-}
-
+export const saveContext = (key: string, items: ExtraContext[]) => contextStore.save(key, items)
