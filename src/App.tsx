@@ -15,7 +15,7 @@ import ChatSidebar from './components/ChatSidebar'
 import SettingsDialog from './components/SettingsDialog'
 import { Autocomplete } from './components/Autocomplete'
 import { markdownToHtml, htmlToMarkdown } from './store/markdown'
-import { loadSettings, saveSettings, type Settings } from './store/settings'
+import { loadSettings, saveSettings, loadSecretKeys, type Settings } from './store/settings'
 import { getBridge, blobToBase64 } from './store/bridge'
 import { getContextItems, useContextItems, setContextItems } from './store/context'
 import ContextPanel from './components/ContextPanel'
@@ -71,6 +71,27 @@ export default function App() {
 
   const settingsRef = useRef(settings)
   settingsRef.current = settings
+
+  // Load API keys from the main-process safeStorage store (encrypted at rest)
+  // and merge them into settings. Migrates any legacy plaintext keys left in
+  // localStorage on first load: persists them to safeStorage and strips them
+  // from localStorage via saveSettings.
+  useEffect(() => {
+    let cancelled = false
+    void loadSecretKeys().then((keys) => {
+      if (cancelled) return
+      const prev = settingsRef.current
+      const next: Settings = {
+        ...prev,
+        autocomplete: { ...prev.autocomplete, apiKey: keys.autocomplete ?? prev.autocomplete.apiKey },
+        chat: { ...prev.chat, apiKey: keys.chat ?? prev.chat.apiKey },
+      }
+      setSettings(next)
+      const migrated = (!keys.autocomplete && prev.autocomplete.apiKey) || (!keys.chat && prev.chat.apiKey)
+      if (getBridge()?.secretSave && migrated) saveSettings(next)
+    })
+    return () => { cancelled = true }
+  }, [])
 
   const [aiError, setAiError] = useState<string | null>(null)
 

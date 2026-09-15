@@ -23,6 +23,9 @@ export interface Bridge {
   chatLoad(args: { key: string }): Promise<{ ok: boolean; messages: unknown[] }>
   contextSave(args: { key: string; items: unknown[] }): Promise<{ ok: boolean; error?: string }>
   contextLoad(args: { key: string }): Promise<{ ok: boolean; items: unknown[] }>
+  secretLoad(): Promise<{ ok: boolean; secrets?: Record<string, string>; available?: boolean }>
+  secretSave(args: { secrets: Record<string, string> }): Promise<{ ok: boolean; error?: string; available?: boolean }>
+  openExternal(args: { url: string }): Promise<void>
   onMenuAction(callback: (action: 'new' | 'open' | 'save' | 'saveAs' | 'export' | 'print') => void): () => void
 }
 

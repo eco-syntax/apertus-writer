@@ -5,6 +5,7 @@ import type { Settings } from '../store/settings'
 import { useContextItems } from '../store/context'
 import { loadChat, saveChat } from '../store/chatStorage'
 import ContextAttachments from './ContextAttachments'
+import { getBridge } from '../store/bridge'
 
 interface Props {
   settings: Settings
@@ -44,6 +45,18 @@ export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey,
     if (!loadedRef.current) return
     saveChat(sessionKey, messages)
   }, [sessionKey, messages])
+
+  // Open links in assistant replies in the system browser (via the validated
+  // open-external bridge) instead of navigating the app window, which would
+  // expose the privileged preload bridge to a remote origin.
+  const onMessageClick = (e: React.MouseEvent) => {
+    const a = (e.target as HTMLElement)?.closest('a')
+    if (!a) return
+    const href = a.getAttribute('href')
+    if (!href) return
+    e.preventDefault()
+    getBridge()?.openExternal?.({ url: href })
+  }
 
   const scrollDown = () => setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
 
@@ -106,6 +119,7 @@ export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey,
             {m.role === 'assistant' ? (
               <div
                 className="chat-text markdown"
+                onClick={onMessageClick}
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }}
               />
             ) : (

@@ -4,6 +4,7 @@
 // endpoint (local servers, third-party hosted APIs) without proxies.
 const { app, BrowserWindow, ipcMain, shell, dialog, Menu } = require('electron')
 const path = require('path')
+const dns = require('dns').promises
 const fs = require('fs')
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
@@ -115,10 +116,23 @@ function createWindow() {
     if (items.length > 0) Menu.buildFromTemplate(items).popup()
   })
 
-  // Open external links in the system browser
+  // Open external links in the system browser, but only for http/https —
+  // never hand other schemes (file:, javascript:, ms-msdt:, custom protocol
+  // handlers) to the OS, which are documented RCE/launch vectors.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Navigation guard: the privileged preload bridge is re-injected into every
+  // page loaded in this window, so a link click (or prompt-injected <a>) that
+  // navigates the window to a remote origin would hand window.aiBridge to an
+  // attacker. Only allow navigation to the app's own origin (the dev server in
+  // dev, file:// in the packaged app); everything else is denied. Links are
+  // routed to the system browser via the open-external handler above.
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    const allowed = isDev ? DEV_URL : 'file://'
+    if (!url.startsWith(allowed)) e.preventDefault()
   })
 
   if (isDev) {
@@ -290,10 +304,80 @@ ipcMain.handle('chat-load', chats.load)
 ipcMain.handle('context-save', context.save)
 ipcMain.handle('context-load', context.load)
 
+// --- Secret store (API keys) ----------------------------------------------
+// LLM API keys are persisted with Electron safeStorage, which encrypts with
+// the OS keychain (DPAPI on Windows), so they are not left in plaintext in the
+// renderer's localStorage LevelDB on disk. The renderer holds non-secret
+// settings in localStorage and fetches/merges the keys through here at runtime.
+const { safeStorage } = require('electron')
+function secretsFile() { return path.join(app.getPath('userData'), 'secrets.enc') }
+
+ipcMain.handle('secret-load', async () => {
+  try {
+    const available = safeStorage.isEncryptionAvailable()
+    if (!available) return { ok: true, secrets: {}, available: false }
+    const buf = fs.readFileSync(secretsFile())
+    const json = safeStorage.decryptString(buf)
+    return { ok: true, secrets: JSON.parse(json || '{}'), available: true }
+  } catch { return { ok: true, secrets: {}, available: safeStorage.isEncryptionAvailable() } }
+})
+
+ipcMain.handle('secret-save', async (_event, { secrets }) => {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, available: false }
+    fs.writeFileSync(secretsFile(), safeStorage.encryptString(JSON.stringify(secrets || {})))
+    return { ok: true, available: true }
+  } catch (err) {
+    return { ok: false, error: String(err), available: true }
+  }
+})
+
+// IPC: open an external link in the system browser. Only http/https URLs are
+// allowed — guards against javascript:/file:/custom-protocol handlers being
+// handed to the OS. Used by chat link clicks so they open externally instead
+// of navigating (and exposing the preload bridge to) the app window.
+ipcMain.handle('open-external', async (_event, { url }) => {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return
+  try { await shell.openExternal(url) } catch { /* best-effort */ }
+})
+
 // IPC: perform an HTTP request on behalf of the renderer.
 // args: { url, method, headers, body } → { ok, status, statusText, body }
+// Validate a renderer-supplied request URL to limit the SSRF surface of the
+// main-process HTTP proxy. Allows http/https only, GET/POST only, and rejects
+// hostnames that resolve to the link-local range 169.254.0.0/16 (the cloud
+// instance-metadata service) before fetching.
+// ponytail: cannot block all private/loopback ranges — the app's legitimate
+// use is arbitrary OpenAI-compatible endpoints, including localhost/LAN
+// servers, so only the credential-exfil vector (link-local metadata) is
+// blocked. DNS rebinding / TOCTOU between resolve and fetch remains a ceiling;
+// a full SSRF fix would need an endpoint allowlist, which is a product call.
+const BLOCKED_HOST_RE = /^169\.254\./
+async function assertSafeRequestUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') throw new Error('Invalid URL')
+  let parsed
+  try { parsed = new URL(rawUrl) } catch { throw new Error('Invalid URL') }
+  if (!/^https?:$/.test(parsed.protocol)) throw new Error('Blocked scheme')
+  const host = parsed.hostname
+  // IP-literal hosts: block the metadata range directly.
+  if (BLOCKED_HOST_RE.test(host)) throw new Error('Blocked host')
+  // Hostnames: resolve and reject if any address is link-local.
+  try {
+    const looked = await dns.lookup(host, { all: true })
+    if (looked.some((a) => BLOCKED_HOST_RE.test(a.address))) throw new Error('Blocked host')
+  } catch (e) {
+    // lookup failures (e.g. IPv6-only / non-resolvable) are surfaced by fetch
+    // below; only our explicit block should reject here.
+    if (String(e) === 'Error: Blocked host') throw e
+  }
+}
+
 ipcMain.handle('ai-request', async (_event, { url, method, headers, body }) => {
   try {
+    await assertSafeRequestUrl(url)
+    if (method !== undefined && method !== 'GET' && method !== 'POST') {
+      return { ok: false, status: 0, statusText: 'Blocked method', body: '' }
+    }
     const res = await fetch(url, { method, headers, body })
     const text = await res.text()
     return { ok: res.ok, status: res.status, statusText: res.statusText, body: text }
@@ -425,8 +509,17 @@ ipcMain.handle('print-document', async (_event, { html, css }) => {
 })
 
 function buildPrintableHtml(html, css) {
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
-    ${css}
+  // Defense in depth: theme CSS comes from a (possibly untrusted) sidecar .css
+  // and is already angle-bracket-rejected on load (cssToTheme); strip any stray
+  // `<` here too so it can never close the <style> block. CSS has no legitimate
+  // use for `<`.
+  const safeCss = css.replace(/</g, '')
+  // CSP blocks any script in the offscreen data-URL document (theme values,
+  // document HTML) — print/PDF only needs styles + the body markup.
+  return `<!doctype html><html><head><meta charset="utf-8">` +
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">` +
+    `<style>
+    ${safeCss}
     body { font-family: var(--doc-font); font-size: var(--doc-font-size);
            color: var(--doc-text-color); background: var(--doc-bg);
            max-width: var(--doc-max-width); margin: 0 auto; padding: 24px; line-height: 1.65; }

@@ -57,14 +57,18 @@ turndown.addRule('table', {
   },
 })
 
+// Parse markdown to HTML and sanitize it. The editor content path (opened
+// files, session restore, code-view round-trip) feeds untrusted markdown here,
+// so it goes through DOMPurify exactly like LLM replies — ProseMirror's schema
+// whitelist is not treated as a security boundary on its own.
 export function markdownToHtml(md: string): string {
-  return marked.parse(md, { async: false }) as string
+  return DOMPurify.sanitize(marked.parse(md, { async: false }) as string)
 }
 
-// Render markdown from untrusted sources (e.g. LLM replies) to HTML with all
-// script vectors stripped: event handlers, javascript: URLs, script/iframe, etc.
+// Render markdown from untrusted sources (e.g. LLM replies) to HTML. Now
+// identical to markdownToHtml — kept as a distinct name for call-site clarity.
 export function renderMarkdown(md: string): string {
-  return DOMPurify.sanitize(marked.parse(md, { async: false }) as string)
+  return markdownToHtml(md)
 }
 
 export function htmlToMarkdown(html: string): string {
