@@ -48,6 +48,8 @@ export async function buildOdt(html: string, themeVars: ThemeVars): Promise<Blob
   const images: { name: string; dataUrl: string }[] = []
 
   const bodyParts: string[] = []
+  const tableColStyles: string[] = []
+  let tableCount = 0
 
   const para = (style: string, runs: InlineRun[]) =>
     `<text:p text:style-name="${style}">${spans(runs, t, textStyleCache, autoStyles)}</text:p>`
@@ -78,8 +80,12 @@ export async function buildOdt(html: string, themeVars: ThemeVars): Promise<Blob
         const cellP = (runs: InlineRun[], bold: boolean) =>
           `<text:p text:style-name="Table_20_Contents">${spans(bold ? runs.map((r) => ({ ...r, bold: true })) : runs, t, textStyleCache, autoStyles)}</text:p>`
         const cols = Math.max(b.header.length, ...b.rows.map((r) => r.length), 1)
-        let xml = `<table:table table:name="Table${bodyParts.length}" table:style-name="Table1">`
-        xml += `<table:table-column table:number-columns-repeated="${cols}"/>`
+        const tableIndex = tableCount++
+        // Fixed proportional column widths so the table spans exactly the text width
+        const colStyleName = `TabCol${tableIndex}`
+        tableColStyles.push(`<style:style style:name="${colStyleName}" style:family="table-column"><style:table-column-properties style:column-width="${100 / cols}%"/></style:style>`)
+        let xml = `<table:table table:name="Table${tableIndex}" table:style-name="Table1">`
+        xml += `<table:table-column table:style-name="${colStyleName}" table:number-columns-repeated="${cols}"/>`
         if (b.header.length) {
           xml += `<table:table-header-rows><table:table-row>${b.header.map((h) =>
             `<table:table-cell table:style-name="Table1.A1" office:value-type="string">${cellP([{ text: h }], true)}</table:table-cell>`,
@@ -150,7 +156,7 @@ export async function buildOdt(html: string, themeVars: ThemeVars): Promise<Blob
       <style:text-properties fo:font-size="${pt(t.fontSizePt)}" fo:color="${hex(t.textColor)}" style:font-name="BodyFont"/>
     </style:style>
     <style:style style:name="Table1" style:family="table">
-      <style:table-properties style:width="100%" table:align="left"/>
+      <style:table-properties style:width="100%" table:align="margins"/>
     </style:style>
     <style:style style:name="Table1.A1" style:family="table-cell">
       <style:table-cell-properties fo:border="0.5pt solid #d0d7de" fo:background-color="${hex(t.codeBg)}" fo:padding="0.05in"/>
@@ -161,6 +167,7 @@ export async function buildOdt(html: string, themeVars: ThemeVars): Promise<Blob
     <style:style style:name="Horizontal_20_Line" style:family="paragraph" style:parent-style-name="Standard">
       <style:paragraph-properties fo:border-bottom="1pt solid #d0d7de" fo:margin-bottom="0.15in"/>
     </style:style>
+    ${tableColStyles.join('\n    ')}
     <text:list-style style:name="List_20_1">
       <text:list-level-style-bullet text:level="1" text:bullet-char="•">
         <style:list-level-properties text:min-label-width="0.25in"/>
