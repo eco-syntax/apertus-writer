@@ -1,12 +1,15 @@
 // DOCX export: renders the shared block model with the active theme applied
 // as native Word styles (fonts, colors, sizes, shading, table borders).
+// The `docx` package is kept deliberately: it is already installed and handles
+// correct OOXML (numbering, styles, relationships) in far less — and more
+// battle-tested — code than hand-rolling OOXML the way exportOdt does for ODF.
 import {
   Document, Packer, Paragraph, TextRun, ExternalHyperlink, ImageRun,
   HeadingLevel, AlignmentType, Table, TableRow, TableCell, WidthType,
   BorderStyle, ShadingType, convertMillimetersToTwip, LevelFormat,
 } from 'docx'
 import type { ILevelsOptions } from 'docx'
-import { htmlToBlocks, themeFromVars, HEADING_SCALE, type Block, type InlineRun, type ExportTheme } from './exportModel'
+import { htmlToBlocks, themeFromVars, HEADING_SCALE, parseImageDataUrl, type Block, type InlineRun, type ExportTheme } from './exportModel'
 import type { ThemeVars } from '../components/StylePanel'
 
 const halfPt = (pt: number) => Math.round(pt * 2)
@@ -31,17 +34,7 @@ function textRuns(runs: InlineRun[], t: ExportTheme, opts: { heading?: boolean }
   })
 }
 
-function dataUrlToBytes(dataUrl: string): { data: Uint8Array; type: 'png' | 'jpg' | 'gif' | 'bmp' } | null {
-  const m = dataUrl.match(/^data:image\/(png|jpe?g|gif|bmp);base64,(.+)$/)
-  if (!m) return null
-  const bin = atob(m[2])
-  const bytes = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  const t = m[1].toLowerCase()
-  return { data: bytes, type: t === 'jpeg' ? 'jpg' : (t as 'png' | 'jpg' | 'gif' | 'bmp') }
-}
-
-async function imageSize(dataUrl: string): Promise<{ width: number; height: number }> {
+function imageSize(dataUrl: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve) => {
     const img = new Image()
     img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
@@ -110,14 +103,14 @@ async function blockToDocx(block: Block, t: ExportTheme, numId: { current: numbe
       return [new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows })]
     }
     case 'image': {
-      const img = dataUrlToBytes(block.dataUrl)
+      const img = parseImageDataUrl(block.dataUrl)
       if (!img) return []
       const { width, height } = await imageSize(block.dataUrl)
       const maxW = 550
       const scale = width > maxW ? maxW / width : 1
       return [new Paragraph({
         alignment: AlignmentType.CENTER,
-        children: [new ImageRun({ data: img.data, transformation: { width: Math.round(width * scale), height: Math.round(height * scale) }, type: img.type })],
+        children: [new ImageRun({ data: img.data, transformation: { width: Math.round(width * scale), height: Math.round(height * scale) }, type: img.ext })],
       })]
     }
     case 'hr':
@@ -134,9 +127,7 @@ export async function buildDocx(html: string, themeVars: ThemeVars): Promise<Blo
   const numId = { current: 1 }
   const children: (Paragraph | Table)[] = []
   for (const b of blocks) {
-    const out = await blockToDocx(b, t, numId)
-    if (Array.isArray(out)) children.push(...out)
-    else children.push(out)
+    children.push(...await blockToDocx(b, t, numId))
   }
 
   // numbering definitions for every list instance created above

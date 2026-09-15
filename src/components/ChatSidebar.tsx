@@ -2,9 +2,9 @@ import { useRef, useState, useEffect } from 'react'
 import { chat, type ChatMessage } from '../api/openai'
 import { renderMarkdown } from '../store/markdown'
 import type { Settings } from '../store/settings'
-import { useContextItems, removeContextItem } from '../store/context'
-import { attachFiles, attachUrl } from '../store/summarize'
+import { useContextItems } from '../store/context'
 import { loadChat, saveChat } from '../store/chatStorage'
+import ContextAttachments from './ContextAttachments'
 
 interface Props {
   settings: Settings
@@ -19,8 +19,6 @@ export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey,
   const [busy, setBusy] = useState(false)
   const [includeDoc, setIncludeDoc] = useState(true)
   const extras = useContextItems()
-  const [urlInput, setUrlInput] = useState('')
-  const fileRef = useRef<HTMLInputElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   // Load this document's chat thread whenever the document identity changes.
@@ -48,15 +46,6 @@ export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey,
   }, [sessionKey, messages])
 
   const scrollDown = () => setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
-
-  const addFiles = (files: FileList | null) => attachFiles(files, settings.chat)
-
-  const addUrl = async () => {
-    const url = urlInput.trim()
-    if (!url) return
-    setUrlInput('')
-    await attachUrl(url, settings.chat)
-  }
 
   const send = async () => {
     const text = input.trim()
@@ -107,20 +96,7 @@ export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey,
       </div>
 
       <div className="chat-extras">
-        {extras.map((ex, i) => (
-          <span key={i} className="ctx-chip" title={ex.name}>
-            {ex.kind === 'url' ? '🔗' : '📄'} {ex.name.slice(0, 30)}
-            <button onClick={() => removeContextItem(i)}>✕</button>
-          </span>
-        ))}
-        <div className="ctx-add">
-          <button className="tb-btn" onClick={() => fileRef.current?.click()}>+ File</button>
-          <input ref={fileRef} type="file" multiple accept=".md,.txt,.markdown,.pdf,.docx,.odt" hidden
-            onChange={(e) => addFiles(e.target.files)} />
-          <input placeholder="Add URL…" value={urlInput}
-            onChange={(e) => setUrlInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addUrl()} />
-        </div>
+        <ContextAttachments settings={settings} />
       </div>
 
       <div className="chat-messages">

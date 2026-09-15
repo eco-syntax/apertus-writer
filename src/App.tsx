@@ -80,15 +80,9 @@ export default function App() {
   // reopens whatever you were working on instead of the welcome page. Lives in
   // the Electron main process (plain-browser sessions are unaffected).
   // Refs mirror the state values the debounced save needs at fire time —
-  // closure-captured values would go stale.
-  const docNameRef = useRef(docName)
-  docNameRef.current = docName
-  const filePathRef = useRef(filePath)
-  filePathRef.current = filePath
-  const codeViewRef = useRef(codeView)
-  codeViewRef.current = codeView
-  const codeTextRef = useRef(codeText)
-  codeTextRef.current = codeText
+  // closure-captured values would go stale. One object keeps them in sync.
+  const sessionRef = useRef({ docName, filePath, codeView, codeText })
+  sessionRef.current = { docName, filePath, codeView, codeText }
   const editorRef = useRef<Editor | null>(null)
   const sessionTimerRef = useRef<number | null>(null)
 
@@ -96,8 +90,9 @@ export default function App() {
     const bridge = getBridge()
     const ed = editorRef.current
     if (!bridge?.sessionSave || !ed) return
-    const content = codeViewRef.current ? codeTextRef.current : htmlToMarkdown(ed.getHTML())
-    void bridge.sessionSave({ docName: docNameRef.current, filePath: filePathRef.current, content })
+    const s = sessionRef.current
+    const content = s.codeView ? s.codeText : htmlToMarkdown(ed.getHTML())
+    void bridge.sessionSave({ docName: s.docName, filePath: s.filePath, content })
   }, [])
 
   const scheduleSessionSave = useCallback(() => {
@@ -267,12 +262,10 @@ export default function App() {
       setCodeText(htmlToMarkdown(editor.getHTML()))
       setCodeView(true)
     } else {
-      const before = getMarkdown()
-      if (codeText !== before) setDirty(true)
       editor?.commands.setContent(markdownToHtml(codeText))
       setCodeView(false)
     }
-  }, [codeView, codeText, editor, getMarkdown])
+  }, [codeView, codeText, editor])
 
   // File operations
   const [confirmNew, setConfirmNew] = useState(false)
@@ -354,8 +347,7 @@ export default function App() {
         if (choice.canceled || !choice.filePath) return
         path = choice.filePath
       }
-      const base64 = await blobToBase64(new Blob([md], { type: 'text/markdown' }))
-      const res = await bridge.writeFile({ filePath: path, base64 })
+      const res = await bridge.writeFile({ filePath: path, text: md })
       if (!res.ok) { flash(`Save failed: ${res.error}`); return }
       setFilePath(path)
       setDocName(path.split(/[\\/]/).pop() || path)
@@ -371,22 +363,13 @@ export default function App() {
       }
       return
     }
-    const blob = new Blob([md], { type: 'text/markdown' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = docName
-    a.click()
-    URL.revokeObjectURL(a.href)
+    downloadBlob(new Blob([md], { type: 'text/markdown' }), docName)
     setDirty(false)
   }
 
   const saveTheme = () => {
-    const blob = new Blob([themeToCss(theme)], { type: 'text/css' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `${themeName.toLowerCase().replace(/\s+/g, '-')}.css`
-    a.click()
-    URL.revokeObjectURL(a.href)
+    downloadBlob(new Blob([themeToCss(theme)], { type: 'text/css' }),
+      `${themeName.toLowerCase().replace(/\s+/g, '-')}.css`)
   }
 
   const loadThemeFile = async (file: File) => {

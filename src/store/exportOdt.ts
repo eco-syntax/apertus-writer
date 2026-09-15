@@ -1,7 +1,7 @@
 // ODT export: builds a .odt (zip of XML) with named styles derived from the
 // active theme, so LibreOffice/OpenOffice renders it like the editor.
 import JSZip from 'jszip'
-import { htmlToBlocks, themeFromVars, HEADING_SCALE, type Block, type InlineRun, type ExportTheme } from './exportModel'
+import { htmlToBlocks, themeFromVars, HEADING_SCALE, parseImageDataUrl, type Block, type InlineRun, type ExportTheme } from './exportModel'
 import type { ThemeVars } from '../components/StylePanel'
 
 const esc = (s: string) =>
@@ -95,10 +95,9 @@ export async function buildOdt(html: string, themeVars: ThemeVars): Promise<Blob
         break
       }
       case 'image': {
-        const m = b.dataUrl.match(/^data:image\/(png|jpe?g|gif);base64,(.+)$/)
-        if (!m) break
-        const ext = m[1] === 'jpeg' ? 'jpg' : m[1]
-        const name = `Pictures/img${images.length + 1}.${ext}`
+        const img = parseImageDataUrl(b.dataUrl)
+        if (!img) break
+        const name = `Pictures/img${images.length + 1}.${img.ext}`
         images.push({ name, dataUrl: b.dataUrl })
         bodyParts.push(
           `<text:p text:style-name="Text_20_body"><draw:frame draw:name="${esc(b.alt || 'image')}" text:anchor-type="paragraph" svg:width="14cm" draw:z-index="0"><draw:image xlink:href="${name}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/></draw:frame></text:p>`,
