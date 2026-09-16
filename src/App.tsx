@@ -14,10 +14,13 @@ import StylePanel, { DEFAULT_THEME, themeToCss, cssToTheme, type ThemeVars } fro
 import ChatSidebar from './components/ChatSidebar'
 import SettingsDialog from './components/SettingsDialog'
 import { Autocomplete } from './components/Autocomplete'
+import { AiPlaceholder } from './components/PlaceholderBlock'
+import WeaveDialog from './components/WeaveDialog'
 import { markdownToHtml, htmlToMarkdown } from './store/markdown'
+import { collectPlaceholders } from './store/weave'
 import { loadSettings, saveSettings, loadSecretKeys, type Settings } from './store/settings'
 import { getBridge, blobToBase64 } from './store/bridge'
-import { getContextItems, useContextItems, setContextItems } from './store/context'
+import { budgetedRefs, useContextItems, setContextItems } from './store/context'
 import ContextPanel from './components/ContextPanel'
 import * as ai from './api/openai'
 import { chatKey, loadContext, saveContext } from './store/chatStorage'
@@ -140,19 +143,7 @@ export default function App() {
     // lengths (4096 tokens ≈ 16k chars) alongside the 1.5k-char document
     // context and generation headroom.
     const REF_BUDGET = 6000
-    const refs = getContextItems()
-    let wrapped = ''
-    if (refs.length > 0) {
-      let budget = REF_BUDGET
-      for (const r of refs) {
-        // Prefer the instruct-model summary; fall back to a raw head excerpt
-        // while summarization is pending or if it failed.
-        const text = r.summary || r.content.slice(0, 1000)
-        if (text.length > budget) continue
-        budget -= text.length
-        wrapped += `<s>${text}</s>`
-      }
-    }
+    const wrapped = budgetedRefs(REF_BUDGET).map((r) => `<s>${r.content}</s>`).join('')
     const buildPrompt = (withRefs: boolean) =>
       withRefs && wrapped ? `${wrapped}<s>${context}` : context
     try {
@@ -182,9 +173,13 @@ export default function App() {
       TableRow,
       TableHeader,
       TableCell,
+      AiPlaceholder,
       Autocomplete.configure({
         fetchSuggestion,
-        shouldAutoSuggest: () => settingsRef.current.autoSuggestEnabled,
+        // Suppress auto-suggest while the editor is read-only (e.g. the weave
+        // dialog is open) — ghost text would otherwise appear mid-weave.
+        shouldAutoSuggest: () =>
+          settingsRef.current.autoSuggestEnabled && editorRef.current?.isEditable !== false,
       }),
     ],
     content: markdownToHtml(WELCOME_MD),
@@ -491,6 +486,38 @@ export default function App() {
     }
   }
 
+  // --- Weave: expand AI placeholder blocks with generated content -----------
+  // While the dialog is open the editor is read-only, so placeholder positions
+  // stay valid within a step; the dialog re-scans after each replacement.
+  const [showWeave, setShowWeave] = useState(false)
+
+  const openWeave = useCallback(() => {
+    if (!editor) return
+    if (collectPlaceholders(editor).length === 0) {
+      flash('No placeholder blocks to weave — insert one with 🧩 Placeholder first.')
+      return
+    }
+    editor.setEditable(false)
+    setShowWeave(true)
+  }, [editor])
+
+  const closeWeave = useCallback(() => {
+    setShowWeave(false)
+    editor?.setEditable(true)
+    editor?.commands.focus()
+  }, [editor])
+
+  // Replace the placeholder node at pos with the chosen markdown (parsed into
+  // the schema so lists/headings come in as real blocks).
+  const applyWovenText = useCallback((pos: number, markdown: string) => {
+    const ed = editorRef.current
+    if (!ed) return
+    const size = ed.state.doc.nodeAt(pos)?.nodeSize ?? 1
+    ed.chain().insertContentAt({ from: pos, to: pos + size }, markdownToHtml(markdown)).run()
+    setDirty(true)
+    scheduleSessionSave()
+  }, [scheduleSessionSave])
+
   // Application-menu actions (Electron): File → Open / Save / Export
   useEffect(() => {
     const bridge = getBridge()
@@ -569,6 +596,7 @@ export default function App() {
       </header>
 
       <Toolbar editor={editor} onInsertImage={() => imageFileRef.current?.click()}
+        onWeave={openWeave}
         codeView={codeView} onToggleCodeView={toggleCodeView}
         autoSuggest={settings.autoSuggestEnabled}
         onToggleAutoSuggest={() => {
@@ -641,6 +669,15 @@ export default function App() {
           confirmLabel="Discard & New"
           onCancel={() => setConfirmNew(false)}
           onConfirm={startNewDocument}
+        />
+      )}
+
+      {showWeave && editor && (
+        <WeaveDialog
+          editor={editor}
+          cfg={settings.chat}
+          onApply={applyWovenText}
+          onClose={closeWeave}
         />
       )}
 

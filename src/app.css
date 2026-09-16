@@ -260,6 +260,74 @@ body {
 .context-panel-note { font-size: 12.5px; color: #57606a; margin: 0; }
 .context-panel-empty { font-size: 12.5px; color: #57606a; margin: 0; }
 
+/* AI placeholder block (🧩): dashed box with an editable description */
+.ph-block {
+  display: flex; align-items: center; gap: 8px;
+  border: 2px dashed #b088e0; background: #faf5ff; border-radius: 8px;
+  padding: 8px 10px; margin: 10px 0;
+}
+.ProseMirror .ph-block.ProseMirror-selectednode { outline: 2px solid #7c3aed; }
+.ph-chip {
+  font-size: 11.5px; font-weight: 600; color: #7c3aed;
+  white-space: nowrap; flex: none;
+}
+.ph-desc {
+  flex: 1; min-width: 0; border: none; background: transparent;
+  font-family: inherit; font-size: 13.5px; font-style: italic; color: #4c1d95;
+}
+.ph-desc:focus { outline: none; }
+.ph-desc::placeholder { color: #a78bfa; }
+.ph-delete {
+  flex: none; border: none; background: none; cursor: pointer;
+  color: #9c6ade; padding: 0 2px;
+}
+.ph-delete:hover { color: #6d28d9; }
+
+/* Weave dialog: candidate cards rendered as themed document content */
+.weave-modal { width: 880px; }
+.weave-candidates { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px; }
+.weave-note { margin: 0; font-size: 13.5px; }
+.weave-error { margin: 0; font-size: 13.5px; color: #b42318; }
+.weave-actions { display: flex; gap: 8px; }
+.weave-candidate {
+  border: 1px solid #d0d7de; border-radius: 8px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px; background: #fff;
+}
+.weave-candidate-head {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.weave-candidate-label { font-size: 12px; font-weight: 600; color: #57606a; }
+.weave-candidate-body {
+  border-top: 1px solid #e2e5e9; padding-top: 8px;
+  font-family: var(--doc-font, Georgia, serif); font-size: 15px; line-height: 1.6;
+  max-height: 260px; overflow-y: auto;
+}
+.weave-candidate-body p { margin: 0.3em 0; }
+.weave-candidate-body h1, .weave-candidate-body h2,
+.weave-candidate-body h3, .weave-candidate-body h4 { margin: 0.5em 0 0.2em; }
+.weave-candidate-body ul, .weave-candidate-body ol { margin: 0.3em 0; padding-left: 22px; }
+.weave-candidate-body blockquote {
+  border-left: 3px solid #d0d7de; margin: 0.3em 0; padding-left: 12px; opacity: 0.85;
+}
+.weave-candidate-body pre {
+  background: #f3f4f6; padding: 8px 10px; border-radius: 6px; overflow-x: auto;
+}
+.weave-candidate-body code {
+  font-family: var(--doc-code-font, monospace); background: #f3f4f6;
+  padding: 0.1em 0.3em; border-radius: 4px; font-size: 0.9em;
+}
+.weave-candidate-body pre code { background: none; padding: 0; }
+.weave-candidate-body table { border-collapse: collapse; }
+.weave-candidate-body th, .weave-candidate-body td {
+  border: 1px solid #d0d7de; padding: 4px 8px;
+}
+.weave-own { display: flex; flex-direction: column; gap: 8px; }
+.weave-own-input {
+  width: 100%; min-height: 110px; resize: vertical;
+  padding: 8px; border: 1px solid #d0d7de; border-radius: 8px;
+  font-family: var(--doc-code-font, monospace); font-size: 13px; line-height: 1.5;
+}
+
 /* Print (browser path): document only, no UI chrome */
 @media print {
   .app-header, .toolbar, .side, .modal-backdrop, .context-panel, .status-bar { display: none !important; }

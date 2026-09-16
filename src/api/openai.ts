@@ -73,18 +73,30 @@ export async function autocomplete(
   return text.replace(/\s+$/, '')
 }
 
-export async function chat(cfg: EndpointConfig, messages: ChatMessage[], maxTokens = 1024): Promise<string> {
+export interface ChatOptions {
+  temperature?: number
+  maxTokens?: number
+  // Stop sequences. When provided (even as an empty list), the built-in '---'
+  // hard cut below is disabled — weave needs legitimate '---' horizontal rules
+  // to survive generation.
+  stop?: string[]
+}
+
+export async function chat(cfg: EndpointConfig, messages: ChatMessage[], options: ChatOptions = {}): Promise<string> {
   const data = JSON.parse(await request(cfg, '/chat/completions', {
     model: cfg.model,
     messages,
-    temperature: 0.7,
-    max_tokens: maxTokens,
-    stop: ['---'],
+    temperature: options.temperature ?? 0.7,
+    max_tokens: options.maxTokens ?? 1024,
+    stop: options.stop ?? ['---'],
   }))
   let text: string = data.choices?.[0]?.message?.content ?? ''
   // Belt-and-suspenders: some servers ignore `stop`; cut anything from '---' on
-  const cut = text.indexOf('---')
-  if (cut !== -1) text = text.slice(0, cut)
+  // (skipped when the caller supplies explicit stop sequences).
+  if (options.stop === undefined) {
+    const cut = text.indexOf('---')
+    if (cut !== -1) text = text.slice(0, cut)
+  }
   return text.trimEnd()
 }
 

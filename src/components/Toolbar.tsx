@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 interface Props {
   editor: Editor | null
   onInsertImage: () => void
+  onWeave: () => void
   codeView: boolean
   onToggleCodeView: () => void
   autoSuggest: boolean
@@ -14,7 +15,7 @@ interface Props {
 
 const clampZoom = (z: number) => Math.min(2, Math.max(0.5, Math.round(z * 10) / 10))
 
-export default function Toolbar({ editor, onInsertImage, codeView, onToggleCodeView, autoSuggest, onToggleAutoSuggest, zoom, onZoomChange }: Props) {
+export default function Toolbar({ editor, onInsertImage, onWeave, codeView, onToggleCodeView, autoSuggest, onToggleAutoSuggest, zoom, onZoomChange }: Props) {
   const [showTableMenu, setShowTableMenu] = useState(false)
   const tableMenuRef = useRef<HTMLDivElement>(null)
 
@@ -126,6 +127,12 @@ export default function Toolbar({ editor, onInsertImage, codeView, onToggleCodeV
       <button className="tb-btn" title="Insert image" disabled={codeView} onClick={onInsertImage}>🖼 Image</button>
       <button className="tb-btn" title="Horizontal rule" disabled={codeView}
         onClick={() => editor.chain().focus().setHorizontalRule().run()}>―</button>
+
+      <span className="tb-sep" />
+      <button className="tb-btn" title="Insert an AI placeholder block (expanded later by Weave)" disabled={codeView}
+        onClick={() => editor.chain().focus().insertAiPlaceholder().run()}>🧩 Placeholder</button>
+      <button className="tb-btn" title="Generate AI content for every placeholder block" disabled={codeView}
+        onClick={onWeave}>🪄 Weave</button>
 
       <span className="tb-sep" />
       <button className="tb-btn" title="Undo" disabled={codeView} onClick={() => editor.chain().focus().undo().run()}>↶</button>
