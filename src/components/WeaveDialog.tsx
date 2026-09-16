@@ -28,6 +28,12 @@ export default function WeaveDialog({ editor, cfg, onApply, onClose }: Props) {
   const [showOwn, setShowOwn] = useState(false)
   const [ownText, setOwnText] = useState('')
   const [woven, setWoven] = useState(0)
+  // Blocks explicitly skipped ("leave as placeholder"). These stay in the doc,
+  // while woven blocks disappear, so the re-scanned hit list keeps the skipped
+  // ones at its head. Process hits[skipped] — the first not-yet-handled block —
+  // instead of hits[index]: using the growing index against the shrinking array
+  // skips/blocks out of order once an earlier block is woven.
+  const [skipped, setSkipped] = useState(0)
   // Total placeholders when the run started (frozen; the live count shrinks
   // as blocks are woven).
   const totalRef = useRef(0)
@@ -40,11 +46,11 @@ export default function WeaveDialog({ editor, cfg, onApply, onClose }: Props) {
   useEffect(() => {
     const hits = collectPlaceholders(editor)
     if (totalRef.current === 0) totalRef.current = hits.length
-    if (index >= hits.length) {
+    if (skipped >= hits.length) {
       setPhase('done')
       return
     }
-    const hit = hits[index]
+    const hit = hits[skipped]
     setDescription(hit.description)
     setPos(hit.pos)
     setPhase('generating')
@@ -71,12 +77,14 @@ export default function WeaveDialog({ editor, cfg, onApply, onClose }: Props) {
         setPhase('error')
       })
     return () => { cancelled = true }
-  }, [editor, cfg, index, attempt])
+  }, [editor, cfg, index, skipped, attempt])
 
   const advance = (markdown: string | null) => {
     if (markdown !== null) {
       onApply(pos, markdown)
       setWoven((w) => w + 1)
+    } else {
+      setSkipped((s) => s + 1)
     }
     setIndex((i) => i + 1)
   }
@@ -121,15 +129,17 @@ export default function WeaveDialog({ editor, cfg, onApply, onClose }: Props) {
               <p className="weave-note">
                 Block {index + 1} of {totalRef.current}: <em>{description.trim() || '(no description)'}</em>
               </p>
-              {candidates.map((c, i) => (
-                <div className="weave-candidate" key={i}>
-                  <div className="weave-candidate-head">
-                    <span className="weave-candidate-label">Candidate {String.fromCharCode(65 + i)}</span>
-                    <button className="tb-btn primary" onClick={() => advance(c)}>Use this one</button>
+              <div className="weave-candidates">
+                {candidates.map((c, i) => (
+                  <div className="weave-candidate" key={i}>
+                    <div className="weave-candidate-head">
+                      <span className="weave-candidate-label">Candidate {String.fromCharCode(65 + i)}</span>
+                      <button className="tb-btn primary" onClick={() => advance(c)}>Use this one</button>
+                    </div>
+                    <div className="weave-candidate-body" dangerouslySetInnerHTML={{ __html: markdownToHtml(c) }} />
                   </div>
-                  <div className="weave-candidate-body" dangerouslySetInnerHTML={{ __html: markdownToHtml(c) }} />
-                </div>
-              ))}
+                ))}
+              </div>
               {showOwn ? (
                 <div className="weave-own">
                   <textarea

@@ -98,7 +98,12 @@ export function markdownToHtml(md: string): string {
     .split('\n')
     .map((line) => {
       const m = line.match(AI_PLACEHOLDER_LINE)
-      return m ? `<p data-ai-placeholder="${escapeAttr(m[1])}"></p>` : line
+      // A <div>, not a <p>: StarterKit's paragraph rule (tag 'p') would claim
+      // a <p> element before the aiPlaceholder rule ([data-ai-placeholder])
+      // ever sees it, so the node is silently dropped on setContent and the
+      // placeholder is lost on reload. No default extension claims <div>, and
+      // it matches the node's own renderHTML output.
+      return m ? `<div data-ai-placeholder="${escapeAttr(m[1])}"></div>` : line
     })
     .join('\n')
   return marked.parse(pre, { async: false }) as string

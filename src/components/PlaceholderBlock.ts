@@ -38,10 +38,13 @@ export const AiPlaceholder = Node.create({
 
   // What editor.getHTML() emits (exports, markdown conversion). The em note
   // keeps the placeholder visible in docx/odt/PDF exports, where the
-  // interactive node view does not exist.
-  renderHTML({ node }) {
+  // interactive node view does not exist. HTMLAttributes carries the
+  // description's data attribute (see addAttributes) — it must be merged into
+  // the top div or the attribute is dropped from the exported HTML, silently
+  // turning the placeholder into plain text on the next open/re-save.
+  renderHTML({ node, HTMLAttributes }) {
     const desc = String(node.attrs.description || '').trim() || '(no description yet)'
-    return ['div', {}, ['p', {}, ['em', {}, `🧩 Placeholder: ${desc}`]]]
+    return ['div', HTMLAttributes, ['p', {}, ['em', {}, `🧩 Placeholder: ${desc}`]]]
   },
 
   addCommands() {
@@ -49,7 +52,12 @@ export const AiPlaceholder = Node.create({
       insertAiPlaceholder:
         (description: string = '') =>
         ({ commands }) =>
-          commands.insertContent({ type: this.name, attrs: { description } }),
+          // updateSelection: false — with the default true, insertContent
+          // leaves a NodeSelection on the atom when no text cursor can sit
+          // after it (placeholder at end of document), and the next typed
+          // character then replaces the whole block. Keep the cursor where
+          // it was; Gapcursor + arrow keys still reach positions around it.
+          commands.insertContent({ type: this.name, attrs: { description } }, { updateSelection: false }),
     }
   },
 

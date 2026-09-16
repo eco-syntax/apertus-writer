@@ -20,7 +20,7 @@ import { markdownToHtml, htmlToMarkdown } from './store/markdown'
 import { collectPlaceholders } from './store/weave'
 import { loadSettings, saveSettings, type Settings } from './store/settings'
 import { getBridge, blobToBase64 } from './store/bridge'
-import { getContextItems, useContextItems, setContextItems } from './store/context'
+import { budgetedRefs, useContextItems, setContextItems } from './store/context'
 import ContextPanel from './components/ContextPanel'
 import * as ai from './api/openai'
 import { chatKey, loadContext, saveContext } from './store/chatStorage'
@@ -127,19 +127,7 @@ export default function App() {
     // lengths (4096 tokens ≈ 16k chars) alongside the 1.5k-char document
     // context and generation headroom.
     const REF_BUDGET = 6000
-    const refs = getContextItems()
-    let wrapped = ''
-    if (refs.length > 0) {
-      let budget = REF_BUDGET
-      for (const r of refs) {
-        // Prefer the instruct-model summary; fall back to a raw head excerpt
-        // while summarization is pending or if it failed.
-        const text = r.summary || r.content.slice(0, 1000)
-        if (text.length > budget) continue
-        budget -= text.length
-        wrapped += `<s>${text}</s>`
-      }
-    }
+    const wrapped = budgetedRefs(REF_BUDGET).map((r) => `<s>${r.content}</s>`).join('')
     const buildPrompt = (withRefs: boolean) =>
       withRefs && wrapped ? `${wrapped}<s>${context}` : context
     try {

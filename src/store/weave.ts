@@ -5,6 +5,7 @@
 // temperatures so the two candidates genuinely differ.
 import type { Editor } from '@tiptap/react'
 import { chat, type ChatMessage, type EndpointConfig } from '../api/openai'
+import { budgetedRefs } from './context'
 
 export interface PlaceholderHit {
   pos: number // position of the placeholder node in the doc
@@ -27,9 +28,14 @@ export function collectPlaceholders(editor: Editor): PlaceholderHit[] {
   return hits
 }
 
+// Reference documents share fetchSuggestion's budget so the request fits the
+// same context windows: summaries (or 1000-char head excerpts), 6k total.
+const REF_BUDGET = 6000
+
 // Prompt: the description is the instruction; surrounding document text gives
-// the model voice/tense context. Budgets mirror fetchSuggestion (~1.5k chars
-// before) so the request fits typical LM Studio context windows.
+// the model voice/tense context, and budgeted reference excerpts (same rule
+// as autocomplete) inform the section. Budgets mirror fetchSuggestion
+// (~1.5k chars before) so the request fits typical LM Studio context windows.
 export function buildMessages(hit: PlaceholderHit, editor: Editor): ChatMessage[] {
   const doc = editor.state.doc
   const before = doc.textBetween(Math.max(0, hit.pos - 1500), hit.pos, '\n\n', ' ')
@@ -48,6 +54,13 @@ export function buildMessages(hit: PlaceholderHit, editor: Editor): ChatMessage[
   if (before.trim()) parts.push(`<document_before>\n${before}\n</document_before>`)
   parts.push(`<section_description>\n${description}\n</section_description>`)
   if (after.trim()) parts.push(`<document_after>\n${after}\n</document_after>`)
+  const refs = budgetedRefs(REF_BUDGET)
+  if (refs.length > 0) {
+    const blocks = refs.map(
+      (r) => `<reference_document name="${r.name}" kind="${r.kind}">\n${r.content}\n</reference_document>`,
+    )
+    parts.push(`<reference_documents>\n${blocks.join('\n')}\n</reference_documents>`)
+  }
   parts.push('Write the markdown for <section_description> now. Return only the markdown.')
 
   return [

@@ -288,7 +288,8 @@ body {
 .ph-delete:hover { color: #6d28d9; }
 
 /* Weave dialog: candidate cards rendered as themed document content */
-.weave-modal { width: 640px; }
+.weave-modal { width: 880px; }
+.weave-candidates { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px; }
 .weave-note { margin: 0; font-size: 13.5px; }
 .weave-error { margin: 0; font-size: 13.5px; color: #b42318; }
 .weave-actions { display: flex; gap: 8px; }
