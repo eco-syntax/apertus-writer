@@ -116,11 +116,19 @@ function createWindow() {
     if (items.length > 0) Menu.buildFromTemplate(items).popup()
   })
 
-  // Open external links in the system browser, but only for http/https —
-  // never hand other schemes (file:, javascript:, ms-msdt:, custom protocol
-  // handlers) to the OS, which are documented RCE/launch vectors.
+  // Open external links in the system browser, but only http(s) URLs.
+  // shell.openExternal hands the URL straight to the OS, where protocols like
+  // file:, ms-msdt: or search-ms: are documented RCE/launch vectors on
+  // Windows — so anything outside http(s) is silently denied.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) shell.openExternal(url)
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        shell.openExternal(parsed.toString())
+      }
+    } catch {
+      // Unparseable or non-http(s) URL — deny.
+    }
     return { action: 'deny' }
   })
 
