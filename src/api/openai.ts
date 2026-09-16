@@ -26,7 +26,7 @@ function headers(cfg: EndpointConfig): Record<string, string> {
   return h
 }
 
-async function request(cfg: EndpointConfig, path: string, body: object, signal?: AbortSignal): Promise<Response> {
+async function request(cfg: EndpointConfig, path: string, body: object): Promise<string> {
   const url = `${cfg.baseUrl.replace(/\/$/, '')}${path}`
   const bridge = getBridge()
   if (bridge) {
@@ -41,19 +41,18 @@ async function request(cfg: EndpointConfig, path: string, body: object, signal?:
       if (res.status === 0) throw new TypeError(res.statusText)
       throw new Error(`${res.status} ${res.statusText}${res.body ? ` — ${res.body.slice(0, 200)}` : ''}`)
     }
-    return new Response(res.body, { status: 200 })
+    return res.body
   }
   const res = await fetch(url, {
     method: 'POST',
     headers: headers(cfg),
-    signal,
     body: JSON.stringify(body),
   })
   if (!res.ok) {
     const detail = await res.text().catch(() => '')
     throw new Error(`${res.status} ${res.statusText}${detail ? ` — ${detail.slice(0, 200)}` : ''}`)
   }
-  return res
+  return res.text()
 }
 
 // Autocomplete uses the raw completions endpoint (not chat completions):
@@ -62,16 +61,14 @@ async function request(cfg: EndpointConfig, path: string, body: object, signal?:
 export async function autocomplete(
   cfg: EndpointConfig,
   context: string,
-  signal?: AbortSignal,
 ): Promise<string> {
-  const res = await request(cfg, '/completions', {
+  const data = JSON.parse(await request(cfg, '/completions', {
     model: cfg.model,
     prompt: context,
     max_tokens: 48,
     temperature: 0.3,
     stop: ['\n\n', '</s>'],
-  }, signal)
-  const data = await res.json()
+  }))
   const text: string = data.choices?.[0]?.text ?? ''
   return text.replace(/\s+$/, '')
 }
@@ -86,14 +83,13 @@ export interface ChatOptions {
 }
 
 export async function chat(cfg: EndpointConfig, messages: ChatMessage[], options: ChatOptions = {}): Promise<string> {
-  const res = await request(cfg, '/chat/completions', {
+  const data = JSON.parse(await request(cfg, '/chat/completions', {
     model: cfg.model,
     messages,
     temperature: options.temperature ?? 0.7,
     max_tokens: options.maxTokens ?? 1024,
     stop: options.stop ?? ['---'],
-  })
-  const data = await res.json()
+  }))
   let text: string = data.choices?.[0]?.message?.content ?? ''
   // Belt-and-suspenders: some servers ignore `stop`; cut anything from '---' on
   // (skipped when the caller supplies explicit stop sequences).
@@ -110,19 +106,17 @@ export async function chat(cfg: EndpointConfig, messages: ChatMessage[], options
 export async function testConnection(cfg: EndpointConfig, kind: 'completions' | 'chat' = 'chat'): Promise<string | null> {
   try {
     if (kind === 'completions') {
-      const res = await request(cfg, '/completions', {
+      await request(cfg, '/completions', {
         model: cfg.model,
         prompt: 'The capital of France is',
         max_tokens: 5,
       })
-      await res.json()
     } else {
-      const res = await request(cfg, '/chat/completions', {
+      await request(cfg, '/chat/completions', {
         model: cfg.model,
         messages: [{ role: 'user', content: 'Say "ok".' }],
         max_tokens: 5,
       })
-      await res.json()
     }
     return null
   } catch (err) {
