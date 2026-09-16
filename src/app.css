@@ -335,8 +335,11 @@ body {
   .app, .app-body, .doc-scroll { display: block; height: auto; overflow: visible; }
   .doc-scroll { padding: 0; }
   .doc-page {
-    box-shadow: none; border-radius: 0; max-width: none;
+    box-shadow: none; border-radius: 0; max-width: 100%;
     margin: 0; padding: 0; min-height: 0;
   }
+  table { table-layout: fixed; width: 100%; word-break: break-word; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  td, p { overflow-wrap: break-word; }
   h1, h2, h3, h4, img, tr, pre, blockquote { page-break-inside: avoid; }
 }
