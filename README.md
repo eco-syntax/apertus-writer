@@ -35,11 +35,32 @@ npm install
 npm run dev:electron
 ```
 
-**Plain browser** — works too, but the endpoint must allow cross-origin requests (LM Studio: enable CORS in server settings; Ollama: set `OLLAMA_ORIGINS`):
+**Plain browser / shared web mode** — one small Node server serves the built app and proxies AI requests, so CORS never applies and any endpoint works:
 
 ```bash
-npm run dev   # then open http://localhost:5173
+npm run build
+npm start   # PORT env var overrides, default http://localhost:8787
 ```
+
+For development, `npm run dev` starts the server and Vite together (hot reload at http://localhost:5173, API proxied to the server).
+
+Two ways to run it for others:
+
+- **Managed mode (recommended for sharing)** — set env vars before `npm start` and visitors get a working app with zero setup; endpoints and the API key never reach the browser:
+
+  ```bash
+  APERTUS_BASE_URL=https://api.example.com/v1 \
+  APERTUS_API_KEY=sk-… \
+  APERTUS_AUTOCOMPLETE_MODEL=apertus-v1.1-4b \
+  APERTUS_CHAT_MODEL=apertus-v1.1-4b-instruct \
+  npm start
+  ```
+
+  `APERTUS_CHAT_MODEL` defaults to `APERTUS_AUTOCOMPLETE_MODEL` if unset. Each feature can also point at a different server (e.g. local LM Studio for autocomplete, cloud for chat): `APERTUS_AUTOCOMPLETE_BASE_URL` / `APERTUS_CHAT_BASE_URL` and `APERTUS_AUTOCOMPLETE_API_KEY` / `APERTUS_CHAT_API_KEY` override the shared base URL / key. The chat feature additionally falls back to the `PUBLICAI_BASE` / `PUBLICAI_MODEL` / `PUBLICAI_API_KEY` environment variables (after explicit `APERTUS_CHAT_*`, before the shared `APERTUS_*`), so a host with Public AI creds set system-wide only needs to configure the local autocomplete endpoint. Note the endpoint settings UI is hidden for visitors and anyone with the URL spends the host's key — add auth/rate limiting in front if that matters.
+
+- **Bring-your-own-key mode** — no env vars: each visitor configures their own OpenAI-compatible endpoint (Settings). Only public https endpoints are reachable (localhost/ LAN targets are blocked server-side), and API keys are stored in the visitor's browser localStorage.
+
+In both browser modes the working document autosaves to the browser's localStorage and is restored on reopen (per browser, no cross-device sync). Chat history, reference context, and settings persist the same way.
 
 ### Prerequisites
 
