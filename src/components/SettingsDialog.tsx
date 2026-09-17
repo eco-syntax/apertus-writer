@@ -4,6 +4,7 @@ import { testConnection, type EndpointConfig } from '../api/openai'
 
 interface Props {
   settings: Settings
+  managed?: { autocomplete: string; chat: string } | null
   onSave: (s: Settings) => void
   onClose: () => void
 }
@@ -55,7 +56,7 @@ function EndpointFields({
   )
 }
 
-export default function SettingsDialog({ settings, onSave, onClose }: Props) {
+export default function SettingsDialog({ settings, managed, onSave, onClose }: Props) {
   const [s, setS] = useState(settings)
 
   return (
@@ -81,19 +82,29 @@ export default function SettingsDialog({ settings, onSave, onClose }: Props) {
             </label>
           </fieldset>
 
-          <EndpointFields
-            title="Autocomplete (base model, /completions)"
-            value={s.autocomplete}
-            onChange={(v) => setS({ ...s, autocomplete: v })}
-            testKind="completions"
-          />
+          {managed ? (
+            <p className="settings-note">
+              AI endpoints for this deployment are managed by the server host —
+              nothing to configure. Models: <strong>{managed.autocomplete}</strong>{' '}
+              (autocomplete), <strong>{managed.chat}</strong> (chat).
+            </p>
+          ) : (
+            <>
+              <EndpointFields
+                title="Autocomplete (base model, /completions)"
+                value={s.autocomplete}
+                onChange={(v) => setS({ ...s, autocomplete: v })}
+                testKind="completions"
+              />
 
-          <EndpointFields
-            title="Chat (instruct model, /chat/completions)"
-            value={s.chat}
-            onChange={(v) => setS({ ...s, chat: v })}
-            testKind="chat"
-          />
+              <EndpointFields
+                title="Chat (instruct model, /chat/completions)"
+                value={s.chat}
+                onChange={(v) => setS({ ...s, chat: v })}
+                testKind="chat"
+              />
+            </>
+          )}
         </div>
 
         <div className="modal-footer">

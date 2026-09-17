@@ -5,6 +5,9 @@
 const { app, BrowserWindow, ipcMain, shell, dialog, Menu } = require('electron')
 const path = require('path')
 const { pathToFileURL } = require('url')
+const net = require('net')
+const http = require('http')
+const https = require('https')
 const dns = require('dns').promises
 const fs = require('fs')
 
@@ -128,11 +131,19 @@ function createWindow() {
     if (items.length > 0) Menu.buildFromTemplate(items).popup()
   })
 
-  // Open external links in the system browser, but only for http/https —
-  // never hand other schemes (file:, javascript:, ms-msdt:, custom protocol
-  // handlers) to the OS, which are documented RCE/launch vectors.
+  // Open external links in the system browser, but only http(s) URLs.
+  // shell.openExternal hands the URL straight to the OS, where protocols like
+  // file:, ms-msdt: or search-ms: are documented RCE/launch vectors on
+  // Windows — so anything outside http(s) is silently denied.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) shell.openExternal(url)
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        shell.openExternal(parsed.toString())
+      }
+    } catch {
+      // Unparseable or non-http(s) URL — deny.
+    }
     return { action: 'deny' }
   })
 
@@ -360,42 +371,116 @@ ipcMain.handle('open-external', async (_event, { url }) => {
 // args: { url, method, headers, body } → { ok, status, statusText, body }
 // Validate a renderer-supplied request URL to limit the SSRF surface of the
 // main-process HTTP proxy. Allows http/https only, GET/POST only, and rejects
-// hostnames that resolve to the link-local range 169.254.0.0/16 (the cloud
-// instance-metadata service) before fetching.
-// ponytail: cannot block all private/loopback ranges — the app's legitimate
-// use is arbitrary OpenAI-compatible endpoints, including localhost/LAN
-// servers, so only the credential-exfil vector (link-local metadata) is
-// blocked. DNS rebinding / TOCTOU between resolve and fetch remains a ceiling;
-// a full SSRF fix would need an endpoint allowlist, which is a product call.
-const BLOCKED_HOST_RE = /^169\.254\./
-async function assertSafeRequestUrl(rawUrl) {
+// the link-local range 169.254.0.0/16 — where AWS/Azure/GCP expose the cloud
+// instance-metadata service and where credentials live — in every spelling:
+// dotted IPv4, IPv6-mapped (`[::ffff:169.254.169.254]`, which URL normalises
+// to hex `[::ffff:a9fe:a9fe]`), and any address returned by a hostile DNS.
+// ponytail: LAN/loopback are deliberately allowed — the app's legitimate use
+// is arbitrary OpenAI-compatible endpoints, including localhost/LAN servers —
+// so only the credential-exfil vector (link-local metadata) is blocked.
+//
+// The request uses the *resolved* address, not the original hostname: after a
+// host resolves here it is pinned for the actual connection (custom lookup),
+// so a DNS rebinding / TOCTOU between validation and fetch can't slip a
+// blocked address in. Redirects are not auto-followed — following an
+// attacker-controlled Location would re-resolve an arbitrary host.
+const isLinkLocal = (addr) => {
+  if (/^169\.254\./.test(addr)) return true // IPv4 link-local
+  const mapped = /^::ffff:(.+)$/i.exec(addr) // IPv4-mapped IPv6
+  return mapped ? /^169\.254\./.test(embeddedIPv4(mapped[1])) : false
+}
+
+// Embedded IPv4 from the tail of an IPv4-mapped IPv6 address: accepts the
+// dotted form (`169.254.169.254`) and the two-hex-group form (`a9fe:a9fe`).
+function embeddedIPv4(part) {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(part)) return part
+  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(part)
+  if (!hex) return null
+  const bytes = (hex[1].padStart(4, '0') + hex[2].padStart(4, '0')).match(/../g)
+  return bytes.map((b) => parseInt(b, 16)).join('.')
+}
+
+// Validate the renderer-supplied URL and return its parsed form. Scheme is
+// restricted to http/https (blocking file:, javascript:, etc.).
+function parseRequestUrl(rawUrl) {
   if (typeof rawUrl !== 'string') throw new Error('Invalid URL')
   let parsed
   try { parsed = new URL(rawUrl) } catch { throw new Error('Invalid URL') }
   if (!/^https?:$/.test(parsed.protocol)) throw new Error('Blocked scheme')
-  const host = parsed.hostname
-  // IP-literal hosts: block the metadata range directly.
-  if (BLOCKED_HOST_RE.test(host)) throw new Error('Blocked host')
-  // Hostnames: resolve and reject if any address is link-local.
-  try {
-    const looked = await dns.lookup(host, { all: true })
-    if (looked.some((a) => BLOCKED_HOST_RE.test(a.address))) throw new Error('Blocked host')
-  } catch (e) {
-    // lookup failures (e.g. IPv6-only / non-resolvable) are surfaced by fetch
-    // below; only our explicit block should reject here.
-    if (String(e) === 'Error: Blocked host') throw e
+  return parsed
+}
+
+// Resolve a host to concrete addresses and verify none is link-local. IP
+// literals (including IPv6-mapped) are validated directly — no DNS needed.
+// Returns the verified address list, which the fetch then pins.
+async function resolveSafeAddresses(host) {
+  if (net.isIP(host)) {
+    if (isLinkLocal(host)) throw new Error('Blocked host')
+    return [host]
   }
+  const looked = await dns.lookup(host, { all: true, verbatim: true })
+  if (looked.length === 0) throw new Error('Blocked host')
+  if (looked.some((r) => isLinkLocal(r.address))) throw new Error('Blocked host')
+  return looked.map((r) => r.address)
+}
+
+// A net.lookup-compatible function that pins every connection to the already
+// validated addresses so the OS never re-resolves the hostname (no TOCTOU).
+function pinnedLookup(addresses) {
+  return (hostname, options, callback) => {
+    const entries = addresses.map((a) => ({ address: a, family: a.includes(':') ? 6 : 4 }))
+    if (options && options.all) callback(null, entries)
+    else callback(null, entries[0].address, entries[0].family)
+  }
+}
+
+// Perform the HTTP(S) request against the pinned addresses, returning the same
+// shape the previous fetch() produced.
+function rawFetch(parsed, method, headers, body, addresses) {
+  const lib = parsed.protocol === 'https:' ? https : http
+  const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80)
+  const host = parsed.hostname.replace(/^\[|\]$/g, '')
+  return new Promise((resolve, reject) => {
+    const req = lib.request(
+      {
+        protocol: parsed.protocol,
+        hostname: host,
+        port,
+        path: parsed.pathname + parsed.search,
+        method,
+        headers,
+        lookup: pinnedLookup(addresses),
+      },
+      (res) => {
+        const chunks = []
+        res.on('data', (c) => chunks.push(c))
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            body: text,
+          })
+        })
+      }
+    )
+    req.on('error', reject)
+    if (body != null) req.write(typeof body === 'string' ? body : Buffer.from(body))
+    req.end()
+  })
 }
 
 ipcMain.handle('ai-request', async (_event, { url, method, headers, body }) => {
   try {
-    await assertSafeRequestUrl(url)
+    const parsed = parseRequestUrl(url)
     if (method !== undefined && method !== 'GET' && method !== 'POST') {
       return { ok: false, status: 0, statusText: 'Blocked method', body: '' }
     }
-    const res = await fetch(url, { method, headers, body })
-    const text = await res.text()
-    return { ok: res.ok, status: res.status, statusText: res.statusText, body: text }
+    const host = parsed.hostname.replace(/^\[|\]$/g, '')
+    const addresses = await resolveSafeAddresses(host)
+    const result = await rawFetch(parsed, method || 'GET', headers, body, addresses)
+    return result
   } catch (err) {
     return { ok: false, status: 0, statusText: String(err), body: '' }
   }
@@ -535,9 +620,16 @@ function buildPrintableHtml(html, css) {
     `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">` +
     `<style>
     ${safeCss}
+    @page { size: letter; margin: 20mm; }
     body { font-family: var(--doc-font); font-size: var(--doc-font-size);
            color: var(--doc-text-color); background: var(--doc-bg);
            max-width: var(--doc-max-width); margin: 0 auto; padding: 24px; line-height: 1.65; }
+    @media print {
+      body { max-width: 100% !important; padding: 0; }
+      table { table-layout: fixed; word-break: break-word; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+      td, p { overflow-wrap: break-word; }
+    }
     h1,h2,h3,h4 { color: var(--doc-heading-color); }
     a { color: var(--doc-accent); }
     code { font-family: var(--doc-code-font); background: var(--doc-code-bg); padding: 0.15em 0.35em; border-radius: 4px; }
@@ -560,7 +652,7 @@ ipcMain.handle('export-pdf-to', async (_event, { filePath, html, css }) => {
   try {
     win = new BrowserWindow({ show: false, webPreferences: { offscreen: true } })
     await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(fullHtml))
-    const pdf = await win.webContents.printToPDF({ printBackground: true })
+    const pdf = await win.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true })
     fs.writeFileSync(filePath, pdf)
     return { ok: true }
   } catch (err) {
