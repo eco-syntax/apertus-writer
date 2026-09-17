@@ -4,6 +4,7 @@
 // endpoint (local servers, third-party hosted APIs) without proxies.
 const { app, BrowserWindow, ipcMain, shell, dialog, Menu } = require('electron')
 const path = require('path')
+const { pathToFileURL } = require('url')
 const net = require('net')
 const http = require('http')
 const https = require('https')
@@ -12,6 +13,17 @@ const fs = require('fs')
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
 const isDev = !app.isPackaged
+
+// The only URL this window is ever allowed to host. The preload script exposes
+// window.aiBridge (approved-path read/write, secret-load, the ai-request
+// proxy) and is re-injected into every page loaded in the window, so a prefix
+// match (url.startsWith('http://localhost:5173') / 'file://') would let an
+// attacker load `http://localhost:5173.evil.com`, `http://localhost:5173@evil.com`,
+// or any `file:///...` page and inherit fully privileged aiBridge. Requiring the
+// navigation URL to equal the exact app start page (a parsed-origin comparison
+// would be defeated by file: URLs, whose origin is always "null") closes that
+// hole.
+const APP_START_URL = isDev ? DEV_URL : pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href
 
 // Disable GPU compositing: this app is plain DOM/CSS (no WebGL/canvas/video),
 // and a sleep/wake cycle resets the OS GPU device, which Chromium recovers from
@@ -136,14 +148,17 @@ function createWindow() {
   })
 
   // Navigation guard: the privileged preload bridge is re-injected into every
-  // page loaded in this window, so a link click (or prompt-injected <a>) that
-  // navigates the window to a remote origin would hand window.aiBridge to an
-  // attacker. Only allow navigation to the app's own origin (the dev server in
-  // dev, file:// in the packaged app); everything else is denied. Links are
-  // routed to the system browser via the open-external handler above.
-  mainWindow.webContents.on('will-navigate', (e, url) => {
-    const allowed = isDev ? DEV_URL : 'file://'
-    if (!url.startsWith(allowed)) e.preventDefault()
+  // page loaded in this window, so a link click (or prompt-injected <a>) unlucky
+  // enough to navigate the window to an attacker page would hand window.aiBridge
+  // to that page. Only allow the main frame to navigate to the app's own start
+  // page — exactly, not a prefix-variant (see APP_START_URL); everything else is
+  // denied. Links are routed to the system browser via the open-external handler.
+  mainWindow.webContents.on('will-navigate', (e, url, frame) => {
+    // frame === mainFrame also keeps an injected <iframe> subframe from inheriting
+    // the privileged aiBridge.
+    if (frame !== mainWindow.webContents.mainFrame || url !== APP_START_URL) {
+      e.preventDefault()
+    }
   })
 
   if (isDev) {
