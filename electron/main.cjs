@@ -486,24 +486,31 @@ ipcMain.handle('ai-request', async (_event, { url, method, headers, body }) => {
   }
 })
 
-// IPC: show an open dialog for markdown/text files. → { canceled, filePath? }
+// IPC: show an open dialog for documents. → { canceled, filePath? }
 // Needed because Chromium only shows a file chooser on a user activation, so a
 // menu-triggered input.click() in the renderer is silently ignored.
 ipcMain.handle('choose-open-path', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog({
     properties: ['openFile'],
-    filters: [{ name: 'Markdown/Text', extensions: ['md', 'markdown', 'txt'] }],
+    filters: [
+      { name: 'Documents', extensions: ['md', 'markdown', 'txt', 'docx', 'odt'] },
+    ],
   })
   if (canceled || filePaths.length === 0) return { canceled: true }
   approve(filePaths[0])
   return { canceled: false, filePath: filePaths[0] }
 })
 
-// IPC: read a UTF-8 text file. → { ok, content?, error? }
+// IPC: read a file. Text documents come back as UTF-8 `content`; binary office
+// docs (docx/odt) as `base64` for the renderer to import. → { ok, content?,
+// base64?, error? }
 ipcMain.handle('read-file', async (_event, { filePath }) => {
   try {
-    // Reads are limited to dialog-approved markdown/text documents.
-    if (!isApproved(filePath) || !/\.(md|markdown|txt)$/i.test(filePath)) {
+    if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
+    if (/\.(docx|odt)$/i.test(filePath)) {
+      return { ok: true, base64: fs.readFileSync(filePath).toString('base64') }
+    }
+    if (!/\.(md|markdown|txt)$/i.test(filePath)) {
       return { ok: false, error: APPROVED_PATHS_ERROR }
     }
     return { ok: true, content: fs.readFileSync(filePath, 'utf8') }

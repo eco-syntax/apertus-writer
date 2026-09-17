@@ -1,16 +1,19 @@
-// Text extraction from binary document formats (PDF / DOCX / ODT) for use as
-// reference context. Extraction is text-only: paragraph structure is preserved
-// as newlines, but formatting, images, and tables are flattened.
+// Text extraction from binary document formats (PDF / DOCX / ODT). Extraction
+// is text-only: paragraph structure is preserved as newlines, but formatting,
+// images, and tables are flattened. Used for reference context (chat/autocomplete)
+// and for importing DOCX/ODT files as the working document.
 import JSZip from 'jszip'
 
+// The 20k cap keeps reference-context excerpts budget-friendly for prompts.
+// Document imports pass Infinity so the whole file round-trips.
 const MAX_CHARS = 20000
 
-function normalize(text: string): string {
-  return text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, MAX_CHARS)
+function normalize(text: string, limit: number = MAX_CHARS): string {
+  return text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, limit)
 }
 
 /** DOCX: zip of XML; the body text lives in word/document.xml as <w:t> runs. */
-export async function extractDocx(buf: ArrayBuffer): Promise<string> {
+export async function extractDocx(buf: ArrayBuffer, limit: number = MAX_CHARS): Promise<string> {
   const zip = await JSZip.loadAsync(buf)
   const file = zip.file('word/document.xml')
   if (!file) throw new Error('Not a valid DOCX (word/document.xml missing)')
@@ -21,13 +24,13 @@ export async function extractDocx(buf: ArrayBuffer): Promise<string> {
       .map((t) => t.textContent ?? '')
       .join(''),
   )
-  const text = normalize(paragraphs.join('\n'))
+  const text = normalize(paragraphs.join('\n'), limit)
   if (!text) throw new Error('No extractable text found in DOCX')
   return text
 }
 
 /** ODT: zip of XML; the body text lives in content.xml as text:p / text:h. */
-export async function extractOdt(buf: ArrayBuffer): Promise<string> {
+export async function extractOdt(buf: ArrayBuffer, limit: number = MAX_CHARS): Promise<string> {
   const zip = await JSZip.loadAsync(buf)
   const file = zip.file('content.xml')
   if (!file) throw new Error('Not a valid ODT (content.xml missing)')
@@ -37,9 +40,21 @@ export async function extractOdt(buf: ArrayBuffer): Promise<string> {
     ...Array.from(doc.getElementsByTagNameNS(TEXT, 'p')),
     ...Array.from(doc.getElementsByTagNameNS(TEXT, 'h')),
   ]
-  const text = normalize(blocks.map((b) => b.textContent ?? '').join('\n'))
+  const text = normalize(blocks.map((b) => b.textContent ?? '').join('\n'), limit)
   if (!text) throw new Error('No extractable text found in ODT')
   return text
+}
+
+/**
+ * Import helper: extract the full document text from a DOCX/ODT File for
+ * loading as the current document. No 20k cap — the whole file round-trips.
+ */
+export async function extractOffice(f: File): Promise<string> {
+  const ext = f.name.toLowerCase().split('.').pop()
+  const buf = await f.arrayBuffer()
+  if (ext === 'docx') return extractDocx(buf, Number.POSITIVE_INFINITY)
+  if (ext === 'odt') return extractOdt(buf, Number.POSITIVE_INFINITY)
+  throw new Error(`Unsupported import format: ${f.name}`)
 }
 
 /**

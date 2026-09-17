@@ -381,7 +381,19 @@ export default function App() {
     scheduleSessionSave()
   }
 
+  // Open a document. DOCX/ODT are imported: text is extracted (via the same
+  // extractors used for chat reference context) and loaded as markdown.
   const openDocument = async (file: File) => {
+    const ext = file.name.toLowerCase().split('.').pop()
+    if (ext === 'docx' || ext === 'odt') {
+      const { extractOffice } = await import('./store/extract')
+      try {
+        loadMarkdown(await extractOffice(file), file.name.replace(/\.(docx|odt)$/i, '.md'))
+      } catch (err) {
+        flash(`Import failed: ${err}`)
+      }
+      return
+    }
     loadMarkdown(await file.text(), file.name)
   }
 
@@ -398,12 +410,34 @@ export default function App() {
     const choice = await bridge.chooseOpenPath()
     if (choice.canceled || !choice.filePath) return
     const res = await bridge.readFile({ filePath: choice.filePath })
-    if (!res.ok || res.content === undefined) { flash(`Open failed: ${res.error}`); return }
-    loadMarkdown(res.content, choice.filePath.split(/[\\/]/).pop() || choice.filePath, choice.filePath)
-    // Restore the document's sidecar theme if one was saved alongside it;
-    // otherwise fall back to the default theme so an unstyled doc doesn't
-    // inherit the previously-opened document's look.
-    if (bridge.readSidecar) {
+    if (!res.ok || (res.content === undefined && res.base64 === undefined)) {
+      flash(`Open failed: ${res.error}`); return
+    }
+    const name = choice.filePath.split(/[\\/]/).pop() || choice.filePath
+    if (res.base64) {
+      // Binary office import (Electron): decode base64 → File → shared extractor.
+      const bin = atob(res.base64)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      const { extractOffice } = await import('./store/extract')
+      try {
+        loadMarkdown(await extractOffice(new File([bytes], name)), name.replace(/\.(docx|odt)$/i, '.md'))
+      } catch (err) {
+        flash(`Import failed: ${err}`)
+        return
+      }
+    } else if (res.content !== undefined) {
+      loadMarkdown(res.content, name, choice.filePath)
+    }
+    // Binary office imports carry no saved theme; .md imports restore their
+    // sidecar .css. In a plain browser (res.base64 undefined, no bridge)
+    // neither applies.
+    if (res.base64) {
+      setTheme(DEFAULT_THEME); setThemeName('Default')
+    } else if (bridge.readSidecar) {
+      // Restore the document's sidecar theme if one was saved alongside it;
+      // otherwise fall back to the default theme so an unstyled doc doesn't
+      // inherit the previously-opened document's look.
       const sc = await bridge.readSidecar({ filePath: choice.filePath })
       if (sc.ok && sc.css) {
         setTheme(cssToTheme(sc.css))
@@ -665,7 +699,7 @@ export default function App() {
         <span className="app-title">Apertus Writer</span>
         <button className="tb-btn" onClick={newDocument}>New</button>
         <button className="tb-btn" onClick={openViaDialog}>Open</button>
-        <input ref={openFileRef} type="file" accept=".md,.markdown,.txt" hidden
+        <input ref={openFileRef} type="file" accept=".md,.markdown,.txt,.docx,.odt" hidden
           onChange={(e) => e.target.files?.[0] && openDocument(e.target.files[0])} />
         <button className="tb-btn" onClick={() => saveDocument()}>Save{dirty ? ' •' : ''}</button>
         <span className="export-wrap">
