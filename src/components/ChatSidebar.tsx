@@ -9,11 +9,13 @@ import { loadChat, saveChat } from '../store/chatStorage'
 interface Props {
   settings: Settings
   getDocumentMarkdown: () => string
+  // Any text currently selected in the document; empty when nothing is selected.
+  selectedText: string
   sessionKey: string
   onClose: () => void
 }
 
-export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey, onClose }: Props) {
+export default function ChatSidebar({ settings, getDocumentMarkdown, selectedText, sessionKey, onClose }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -75,6 +77,12 @@ export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey,
     if (includeDoc) {
       system += `\n\nThe user is editing the following document:\n---\n${getDocumentMarkdown()}\n---`
     }
+    // Surface the user's current document selection so they can ask for
+    // re-wording or a rewrite of a specific passage.
+    if (selectedText.trim()) {
+      system += `\n\nThe user has selected the following passage in the document — this is what they most likely want help with (e.g. re-writing, shortening, or polishing):\n"""\n${selectedText.trim()}\
+"""`
+    }
     for (const ex of extras) {
       system += `\n\nAdditional context from ${ex.kind} "${ex.name}":\n---\n${ex.content}\n---`
     }
@@ -104,6 +112,14 @@ export default function ChatSidebar({ settings, getDocumentMarkdown, sessionKey,
           <input type="checkbox" checked={includeDoc} onChange={(e) => setIncludeDoc(e.target.checked)} />
           Include document as context
         </label>
+        {selectedText.trim() && (
+          <div className="chat-selection">
+            <span className="selection-label">📌 Selected:</span>
+            <span className="selection-preview" title={selectedText}>
+              {selectedText.length > 80 ? `${selectedText.slice(0, 80)}…` : selectedText}
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="chat-extras">

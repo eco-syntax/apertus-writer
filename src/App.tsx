@@ -73,6 +73,9 @@ export default function App() {
   settingsRef.current = settings
 
   const [aiError, setAiError] = useState<string | null>(null)
+  // The currently selected text in the document, shared with the chat sidebar
+  // so the user can select a passage and ask for re-wording suggestions.
+  const [selectedText, setSelectedText] = useState('')
 
   // --- Session persistence ---------------------------------------------------
   // The working document (markdown + name + on-disk path) is autosaved to a
@@ -173,6 +176,10 @@ export default function App() {
     ],
     content: markdownToHtml(WELCOME_MD),
     onUpdate: () => { setDirty(true); scheduleSessionSave() },
+    onSelectionUpdate: ({ editor: ed }) => {
+      const { from, to } = ed.state.selection
+      setSelectedText(from === to ? '' : ed.state.doc.textBetween(from, to, '\n'))
+    },
     editorProps: {
       attributes: { spellcheck: settings.spellcheckEnabled ? 'true' : 'false' },
     },
@@ -623,6 +630,7 @@ export default function App() {
             <ChatSidebar
               settings={settings}
               getDocumentMarkdown={getMarkdown}
+              selectedText={selectedText}
               sessionKey={sessionKey}
               onClose={() => setShowChat(false)}
             />
