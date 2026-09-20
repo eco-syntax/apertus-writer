@@ -6,6 +6,10 @@ export interface Settings {
   chat: EndpointConfig
   spellcheckEnabled: boolean
   autoSuggestEnabled: boolean
+  // Optional shared secret for the web-mode proxy (server.mjs PROXY_PASSWORD).
+  // Sent as X-Auth-Token with every /api/proxy call so a password-protected
+  // deployment still works. Inert in Electron (proxy not used).
+  proxyPassword: string
   // Web managed mode (server.mjs APERTUS_* env vars): model names are set by
   // the host and endpoints/keys are hidden from the UI; requests go through
   // the proxy with relative paths. Not persisted — re-derived at startup.
@@ -27,6 +31,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   spellcheckEnabled: true,
   autoSuggestEnabled: false,
+  proxyPassword: '',
 }
 
 const KEY = 'apertus-writer-settings-v6'
@@ -82,7 +87,7 @@ export async function loadManagedConfig(): Promise<{ autocomplete: string; chat:
   try {
     const res = await fetch('/api/config')
     if (!res.ok) return null
-    const cfg = await res.json() as { managed?: boolean; autocomplete?: string; chat?: string }
+    const cfg = await res.json() as { managed?: boolean; proxyAuth?: boolean; autocomplete?: string; chat?: string }
     return cfg.managed && cfg.autocomplete && cfg.chat
       ? { autocomplete: cfg.autocomplete, chat: cfg.chat }
       : null

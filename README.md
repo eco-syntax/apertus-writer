@@ -56,11 +56,20 @@ Two ways to run it for others:
   npm start
   ```
 
-  `APERTUS_CHAT_MODEL` defaults to `APERTUS_AUTOCOMPLETE_MODEL` if unset. Each feature can also point at a different server (e.g. local LM Studio for autocomplete, cloud for chat): `APERTUS_AUTOCOMPLETE_BASE_URL` / `APERTUS_CHAT_BASE_URL` and `APERTUS_AUTOCOMPLETE_API_KEY` / `APERTUS_CHAT_API_KEY` override the shared base URL / key. The chat feature additionally falls back to the `PUBLICAI_BASE` / `PUBLICAI_MODEL` / `PUBLICAI_API_KEY` environment variables (after explicit `APERTUS_CHAT_*`, before the shared `APERTUS_*`), so a host with Public AI creds set system-wide only needs to configure the local autocomplete endpoint. Note the endpoint settings UI is hidden for visitors and anyone with the URL spends the host's key — add auth/rate limiting in front if that matters.
+  `APERTUS_CHAT_MODEL` defaults to `APERTUS_AUTOCOMPLETE_MODEL` if unset. Each feature can also point at a different server (e.g. local LM Studio for autocomplete, cloud for chat): `APERTUS_AUTOCOMPLETE_BASE_URL` / `APERTUS_CHAT_BASE_URL` and `APERTUS_AUTOCOMPLETE_API_KEY` / `APERTUS_CHAT_API_KEY` override the shared base URL / key. The chat feature additionally falls back to the `PUBLICAI_BASE` / `PUBLICAI_MODEL` / `PUBLICAI_API_KEY` environment variables (after explicit `APERTUS_CHAT_*`, before the shared `APERTUS_*`), so a host with Public AI creds set system-wide only needs to configure the local autocomplete endpoint. Note the endpoint settings UI is hidden for visitors and anyone with the URL spends the host's key — see [Securing a shared server](#securing-a-shared-server) for how to require a `PROXY_PASSWORD`/loopback bind.
 
 - **Bring-your-own-key mode** — no env vars: each visitor configures their own OpenAI-compatible endpoint (Settings). Only public https endpoints are reachable (localhost/ LAN targets are blocked server-side), and API keys are stored in the visitor's browser localStorage.
 
 In both browser modes the working document autosaves to the browser's localStorage and is restored on reopen (per browser, no cross-device sync). Chat history, reference context, and settings persist the same way.
+
+### Securing a shared server
+
+The server's `/api/proxy` endpoint has **no authentication by default**: it listens on all interfaces, and anyone who can reach it can relay arbitrary HTTP requests through it and (in managed mode) spend the host's API key. The Origin check only blocks requests that *send* a mismatched `Origin` header — `curl`, other servers, and plain network clients pass through unimpeded. Secure it before exposing the port:
+
+- **Set a shared secret** — start the server with `PROXY_PASSWORD=… npm start`. Every browser needs the password too: enter it in ⚙️ Settings → *Proxy password* (in web mode only). Requests are then rejected with `401` unless they carry the matching secret (`X-Auth-Token: <secret>` or `Authorization: Bearer <secret>`, both set by the app automatically).
+- **Bind to loopback** — for a single-user/localhost deployment, use `HOST=127.0.0.1 npm start`; the server then ignores traffic from other machines entirely.
+
+For managed mode in particular, treat the base URL + password pair as credentials for your account: anyone who has them (or the browser that has them saved) can spend your quota.
 
 ### Prerequisites
 

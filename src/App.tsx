@@ -112,6 +112,7 @@ export default function App() {
         autocomplete: { ...prev.autocomplete, apiKey: keys.autocomplete ?? prev.autocomplete.apiKey },
         chat: { ...prev.chat, apiKey: keys.chat ?? prev.chat.apiKey },
       }
+      ai.setProxyPassword(prev.proxyPassword)
       if (managed) {
         // Host-managed web mode: endpoints/keys come from the server; requests
         // use relative proxy paths (baseUrl '') with the key injected server-side.
@@ -803,7 +804,7 @@ export default function App() {
         <SettingsDialog
           settings={settings}
           managed={settings.managed}
-          onSave={(s) => { setSettings(s); saveSettings(s); setShowSettings(false) }}
+          onSave={(s) => { setSettings(s); saveSettings(s); ai.setProxyPassword(s.proxyPassword); setShowSettings(false) }}
           onClose={() => setShowSettings(false)}
         />
       )}
