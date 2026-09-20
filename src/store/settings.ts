@@ -50,18 +50,26 @@ export function loadSettings(): Settings {
 }
 
 // Fetch the persisted API keys from the main-process secret store (encrypted at
-// rest with the OS keychain). In a plain browser (no bridge) there is no
-// safeStorage, so keys fall back to localStorage — acceptable for `npm run dev`
-// only, not the packaged app.
-let secretStoreAvailable = false
+// rest with the OS keychain). When safeStorage is unavailable (packaged
+// Linux/Windows/CI without a keyring / DPAPI context), the main process falls
+// back to reading keys from environment variables and flags `fromEnv` — keys
+// are never written to the renderer's plaintext localStorage.
+let secretKeysFromEnv = false
 export async function loadSecretKeys(): Promise<{ autocomplete?: string; chat?: string }> {
   const bridge = getBridge()
   if (bridge?.secretLoad) {
     const res = await bridge.secretLoad()
-    secretStoreAvailable = res.ok && res.available !== false
+    secretKeysFromEnv = !!res.fromEnv
     return res.ok ? (res.secrets ?? {}) : {}
   }
   return {}
+}
+
+// True when the OS-keychain secure store is unavailable and API keys are being
+// supplied by environment variables (see main.cjs). The UI surfaces a notice so
+// the user knows keys cannot be safely saved at rest for this session.
+export function secretKeysFromEnvActive(): boolean {
+  return secretKeysFromEnv
 }
 
 export async function saveSecretKeys(keys: { autocomplete: string; chat: string }): Promise<void> {
@@ -71,17 +79,19 @@ export async function saveSecretKeys(keys: { autocomplete: string; chat: string 
   }
 }
 
-// Persist non-secret settings to localStorage. When the OS-keychain
-// safeStorage store is available, API keys are stripped here and persisted
-// encrypted via saveSecretKeys; when it is unavailable (no bridge / no
-// keychain), keys stay in localStorage as a fallback so they are not lost.
+// Persist non-secret settings to localStorage. API keys are ALWAYS stripped
+// here and never written to the renderer's plaintext localStorage. When the
+// OS-keychain safeStorage store is available, keys are persisted encrypted via
+// saveSecretKeys; when it is unavailable (no bridge / no keychain), secretSave
+// no-ops and keys must come from environment variables instead — nothing is
+// ever written in cleartext.
 export function saveSettings(s: Settings) {
-  if (secretStoreAvailable) {
-    const { apiKey: _ac, ...autocompleteSafe } = s.autocomplete
-    const { apiKey: _ch, ...chatSafe } = s.chat
-    localStorage.setItem(KEY, JSON.stringify({ ...s, autocomplete: autocompleteSafe, chat: chatSafe }))
+  const { apiKey: _ac, ...autocompleteSafe } = s.autocomplete
+  const { apiKey: _ch, ...chatSafe } = s.chat
+  localStorage.setItem(KEY, JSON.stringify({ ...s, autocomplete: autocompleteSafe, chat: chatSafe }))
+  // Keys supplied by environment variables are read-only for this session and
+  // must not be re-persisted (they cannot be written back to the keychain here).
+  if (!secretKeysFromEnv) {
     void saveSecretKeys({ autocomplete: s.autocomplete.apiKey, chat: s.chat.apiKey })
-    return
   }
-  localStorage.setItem(KEY, JSON.stringify(s))
 }

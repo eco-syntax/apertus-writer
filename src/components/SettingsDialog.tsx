@@ -4,6 +4,7 @@ import { testConnection, type EndpointConfig } from '../api/openai'
 
 interface Props {
   settings: Settings
+  keychainUnavailable?: boolean
   onSave: (s: Settings) => void
   onClose: () => void
 }
@@ -13,11 +14,13 @@ function EndpointFields({
   value,
   onChange,
   testKind = 'chat',
+  keysLocked,
 }: {
   title: string
   value: EndpointConfig
   onChange: (v: EndpointConfig) => void
   testKind?: 'completions' | 'chat'
+  keysLocked: boolean
 }) {
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<string | null>(null)
@@ -42,7 +45,7 @@ function EndpointFields({
           onChange={(e) => onChange({ ...value, model: e.target.value })} />
       </label>
       <label>API key (leave empty for local servers)
-        <input type="password" value={value.apiKey}
+        <input type="password" value={value.apiKey} disabled={keysLocked}
           onChange={(e) => onChange({ ...value, apiKey: e.target.value })} />
       </label>
       <div className="test-row">
@@ -55,7 +58,7 @@ function EndpointFields({
   )
 }
 
-export default function SettingsDialog({ settings, onSave, onClose }: Props) {
+export default function SettingsDialog({ settings, keychainUnavailable = false, onSave, onClose }: Props) {
   const [s, setS] = useState(settings)
 
   return (
@@ -72,6 +75,14 @@ export default function SettingsDialog({ settings, onSave, onClose }: Props) {
             Defaults point to a local LM Studio server.
           </p>
 
+          {keychainUnavailable && (
+            <div className="settings-warning">
+              ⚠️ The OS keychain isn't available on this system, so API keys can't be
+              safely saved at rest. They're being read from environment variables
+              (APERTUS_API_KEY / APERTUS_AUTOCOMPLETE_API_KEY / APERTUS_CHAT_API_KEY).
+            </div>
+          )}
+
           <fieldset className="endpoint-fields">
             <legend>General</legend>
             <label className="row">
@@ -86,6 +97,7 @@ export default function SettingsDialog({ settings, onSave, onClose }: Props) {
             value={s.autocomplete}
             onChange={(v) => setS({ ...s, autocomplete: v })}
             testKind="completions"
+            keysLocked={keychainUnavailable}
           />
 
           <EndpointFields
@@ -93,6 +105,7 @@ export default function SettingsDialog({ settings, onSave, onClose }: Props) {
             value={s.chat}
             onChange={(v) => setS({ ...s, chat: v })}
             testKind="chat"
+            keysLocked={keychainUnavailable}
           />
         </div>
 

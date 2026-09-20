@@ -320,14 +320,40 @@ ipcMain.handle('context-load', context.load)
 const { safeStorage } = require('electron')
 function secretsFile() { return path.join(app.getPath('userData'), 'secrets.enc') }
 
+// When the OS-keychain (safeStorage) store is unavailable — packaged
+// Linux/Windows/CI without a keyring / DPAPI context — API keys must not fall
+// back to plaintext localStorage. Instead they are read from environment
+// variables so they never touch the renderer's on-disk profile.
+//   APERTUS_API_KEY                     → both endpoints
+//   APERTUS_AUTOCOMPLETE_API_KEY        → autocomplete endpoint
+//   APERTUS_CHAT_API_KEY                → chat endpoint
+// Individual variables win over the shared APERTUS_API_KEY.
+function envSecrets() {
+  const secrets = {}
+  const shared = process.env.APERTUS_API_KEY
+  if (process.env.APERTUS_AUTOCOMPLETE_API_KEY ?? shared) secrets.autocomplete = process.env.APERTUS_AUTOCOMPLETE_API_KEY ?? shared
+  if (process.env.APERTUS_CHAT_API_KEY ?? shared) secrets.chat = process.env.APERTUS_CHAT_API_KEY ?? shared
+  return secrets
+}
+
 ipcMain.handle('secret-load', async () => {
   try {
     const available = safeStorage.isEncryptionAvailable()
-    if (!available) return { ok: true, secrets: {}, available: false }
+    if (!available) {
+      // No keychain to decrypt from. Provide keys via environment variables and
+      // flag `fromEnv` so the renderer knows they are read-only (never persisted
+      // to plaintext and not user-editable across sessions).
+      return { ok: true, secrets: envSecrets(), available: false, fromEnv: true }
+    }
     const buf = fs.readFileSync(secretsFile())
     const json = safeStorage.decryptString(buf)
-    return { ok: true, secrets: JSON.parse(json || '{}'), available: true }
-  } catch { return { ok: true, secrets: {}, available: safeStorage.isEncryptionAvailable() } }
+    return { ok: true, secrets: JSON.parse(json || '{}'), available: true, fromEnv: false }
+  } catch {
+    // Missing/corrupt secrets file or a first-run before any key was saved — the
+    // keychain may still be fine, so report the true encryption state.
+    const available = safeStorage.isEncryptionAvailable()
+    return { ok: true, secrets: available ? {} : envSecrets(), available, fromEnv: !available }
+  }
 })
 
 ipcMain.handle('secret-save', async (_event, { secrets }) => {
