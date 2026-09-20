@@ -6,5 +6,5 @@ export default defineConfig({
   // packaged Electron app (absolute '/assets/...' paths resolve to the drive root).
   base: './',
   plugins: [react()],
-  server: { port: 5173 },
+  server: { port: 5173, proxy: { '/api': 'http://localhost:8787' } },
 })

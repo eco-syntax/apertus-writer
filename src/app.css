@@ -15,7 +15,8 @@ body {
   padding: 8px 14px; background: #24292f; color: #fff;
 }
 .app-title { font-weight: 600; margin-right: 8px; }
-.doc-name { color: #aab; font-size: 13px; }
+.doc-name { color: #aab; font-size: 13px; cursor: pointer; }
+.doc-name:hover { text-decoration: underline; }
 .spacer { flex: 1; }
 
 .toolbar {

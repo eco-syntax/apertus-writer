@@ -6,6 +6,10 @@ export interface Settings {
   chat: EndpointConfig
   spellcheckEnabled: boolean
   autoSuggestEnabled: boolean
+  // Web managed mode (server.mjs APERTUS_* env vars): model names are set by
+  // the host and endpoints/keys are hidden from the UI; requests go through
+  // the proxy with relative paths. Not persisted — re-derived at startup.
+  managed?: { autocomplete: string; chat: string }
 }
 
 // Defaults point at a local LM Studio server. Any OpenAI-compatible endpoint
@@ -76,6 +80,22 @@ export async function saveSecretKeys(keys: { autocomplete: string; chat: string 
   const bridge = getBridge()
   if (bridge?.secretSave) {
     await bridge.secretSave({ secrets: keys })
+  }
+}
+
+// Web managed mode: ask the app server who owns the AI endpoints. Returns the
+// host-configured model names, or null in BYOK mode / Electron / server down.
+export async function loadManagedConfig(): Promise<{ autocomplete: string; chat: string } | null> {
+  if (getBridge()) return null
+  try {
+    const res = await fetch('/api/config')
+    if (!res.ok) return null
+    const cfg = await res.json() as { managed?: boolean; autocomplete?: string; chat?: string }
+    return cfg.managed && cfg.autocomplete && cfg.chat
+      ? { autocomplete: cfg.autocomplete, chat: cfg.chat }
+      : null
+  } catch {
+    return null
   }
 }
 

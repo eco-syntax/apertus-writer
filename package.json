@@ -6,7 +6,8 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k \"node server.mjs\" \"vite\"",
+    "start": "node server.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "dev:electron": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && set ELECTRON_RUN_AS_NODE=&& electron .\"",

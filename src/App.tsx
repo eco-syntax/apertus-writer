@@ -10,6 +10,7 @@ import TableHeader from '@tiptap/extension-table-header'
 import TableRow from '@tiptap/extension-table-row'
 import Toolbar from './components/Toolbar'
 import ConfirmDialog from './components/ConfirmDialog'
+import PromptDialog from './components/PromptDialog'
 import StylePanel, { DEFAULT_THEME, themeToCss, cssToTheme, type ThemeVars } from './components/StylePanel'
 import ChatSidebar from './components/ChatSidebar'
 import SettingsDialog from './components/SettingsDialog'
@@ -18,7 +19,7 @@ import { AiPlaceholder } from './components/PlaceholderBlock'
 import WeaveDialog from './components/WeaveDialog'
 import { markdownToHtml, htmlToMarkdown } from './store/markdown'
 import { collectPlaceholders } from './store/weave'
-import { loadSettings, saveSettings, loadSecretKeys, secretKeysFromEnvActive, type Settings } from './store/settings'
+import { loadSettings, saveSettings, loadSecretKeys, secretKeysFromEnvActive, loadManagedConfig, type Settings } from './store/settings'
 import { getBridge, blobToBase64 } from './store/bridge'
 import { budgetedRefs, useContextItems, setContextItems } from './store/context'
 import ContextPanel from './components/ContextPanel'
@@ -48,6 +49,28 @@ Configure it in ⚙️ **Settings** → *Chat*, with its own base URL, model, an
 Both features accept any OpenAI-compatible endpoint. If you use a cloud provider, set the API key in Settings too. If the server is on a different machine, use its URL here.
 
 > In the installed app, whatever you type here autosaves and returns on relaunch — so treat this page as a scratch pad, or open a file with the **Open** button.
+`
+
+// Landing doc for managed web mode (server hosts the AI endpoints — no
+// self-setup talk). Swapped in at startup when /api/config reports managed
+// mode and no session was restored (see the managed-config effect).
+const WELCOME_WEB_MD = `# Welcome to Apertus Writer
+
+You're using the **web edition** of Apertus Writer, a **WYSIWYG markdown editor** — you edit the rendered document directly, and it saves as markdown. The AI features are already configured for you — nothing to set up.
+
+## AI autocomplete (Ctrl-Space)
+
+Press **Ctrl-Space** and a ghost-text suggestion appears; press **Tab** to accept it, or keep typing to dismiss. Turn on the toolbar's **✨ Auto** toggle to get suggestions automatically whenever you pause typing.
+
+## Chat, context & Weave
+
+Open the **💬 Chat sidebar** to talk about the current document — you can also attach files or URLs as extra context. Insert a **🧩 Placeholder** block anywhere, describe what should go there, and **🪄 Weave** fills it in with generated text that matches your document.
+
+## Saving & exporting
+
+- **Ctrl-S** (or **Save**) downloads the document as a **.md** file; **Open** loads one back.
+- **Export** produces a themed **.docx**, **.odt**, or **PDF** (via the print dialog).
+- Everything you type autosaves **in this browser** and comes back when you return — but that's a per-browser working copy, so **download anything you want to keep**.
 `
 
 export default function App() {
@@ -84,7 +107,7 @@ export default function App() {
   const [keychainUnavailable, setKeychainUnavailable] = useState(false)
   useEffect(() => {
     let cancelled = false
-    void loadSecretKeys().then((keys) => {
+    void Promise.all([loadSecretKeys(), loadManagedConfig()]).then(([keys, managed]) => {
       if (cancelled) return
       setKeychainUnavailable(secretKeysFromEnvActive())
       const prev = settingsRef.current
@@ -92,6 +115,19 @@ export default function App() {
         ...prev,
         autocomplete: { ...prev.autocomplete, apiKey: keys.autocomplete ?? prev.autocomplete.apiKey },
         chat: { ...prev.chat, apiKey: keys.chat ?? prev.chat.apiKey },
+      }
+      if (managed) {
+        // Host-managed web mode: endpoints/keys come from the server; requests
+        // use relative proxy paths (baseUrl '') with the key injected server-side.
+        next.managed = managed
+        next.autocomplete = { baseUrl: '', apiKey: '', model: managed.autocomplete }
+        next.chat = { baseUrl: '', apiKey: '', model: managed.chat }
+        // Show the web landing doc instead of the self-hosting quick-start —
+        // only when the editor still holds the untouched welcome doc (no user
+        // edits, no restored session).
+        if (!editorTouchedRef.current && !sessionRestoredRef.current) {
+          editorRef.current?.commands.setContent(markdownToHtml(WELCOME_WEB_MD))
+        }
       }
       setSettings(next)
       const migrated = (!keys.autocomplete && prev.autocomplete.apiKey) || (!keys.chat && prev.chat.apiKey)
@@ -115,12 +151,20 @@ export default function App() {
   const sessionTimerRef = useRef<number | null>(null)
 
   const saveSessionNow = useCallback(() => {
-    const bridge = getBridge()
     const ed = editorRef.current
-    if (!bridge?.sessionSave || !ed) return
+    if (!ed) return
     const s = sessionRef.current
     const content = s.codeView ? s.codeText : htmlToMarkdown(ed.getHTML())
-    void bridge.sessionSave({ docName: s.docName, filePath: s.filePath, content })
+    const bridge = getBridge()
+    if (bridge?.sessionSave) {
+      void bridge.sessionSave({ docName: s.docName, filePath: s.filePath, content })
+      return
+    }
+    // Plain browser: same shape as the Electron session file, in localStorage
+    // (per-browser working-copy autosave; filePath is always null here).
+    try {
+      localStorage.setItem('apertus-writer-session', JSON.stringify({ docName: s.docName, filePath: null, content }))
+    } catch { /* quota / private mode */ }
   }, [])
 
   const scheduleSessionSave = useCallback(() => {
@@ -138,8 +182,9 @@ export default function App() {
   // can leak into suggestions.
   const fetchSuggestion = useCallback(async (context: string) => {
     // Guard: don't attempt a network call when the endpoint isn't configured.
+    // (Managed web mode has no baseUrl — the server proxy owns it.)
     const cfg = settingsRef.current.autocomplete
-    if (!cfg.baseUrl?.trim() || !cfg.model?.trim()) {
+    if (!cfg.model?.trim() || (!cfg.baseUrl?.trim() && !settingsRef.current.managed)) {
       setAiError('Autocomplete not configured — set a base URL and model in Settings.')
       return ''
     }
@@ -187,7 +232,7 @@ export default function App() {
       }),
     ],
     content: markdownToHtml(WELCOME_MD),
-    onUpdate: () => { setDirty(true); scheduleSessionSave() },
+    onUpdate: () => { editorTouchedRef.current = true; setDirty(true); scheduleSessionSave() },
     editorProps: {
       attributes: { spellcheck: settings.spellcheckEnabled ? 'true' : 'false' },
     },
@@ -199,11 +244,30 @@ export default function App() {
   // editor exists; the Electron bridge is absent in a plain browser, which
   // then keeps the welcome document.
   const restoredRef = useRef(false)
+  // Set once a session is restored (Electron or localStorage) or the user
+  // edits — gates the managed-mode welcome swap so it can never clobber a
+  // restored document (TipTap setContent doesn't fire onUpdate).
+  const editorTouchedRef = useRef(false)
+  const sessionRestoredRef = useRef(false)
   useEffect(() => {
     if (!editor || restoredRef.current) return
     restoredRef.current = true
     const bridge = getBridge()
-    if (!bridge?.sessionLoad) return
+    if (!bridge?.sessionLoad) {
+      // Plain browser: restore the working copy from localStorage.
+      try {
+        const raw = localStorage.getItem('apertus-writer-session')
+        const session = raw ? JSON.parse(raw) : null
+        if (session && typeof session.content === 'string' && editorRef.current) {
+          editorRef.current.commands.setContent(markdownToHtml(session.content))
+          setDocName(typeof session.docName === 'string' ? session.docName : 'untitled.md')
+          setFilePath(null)
+          setDirty(false)
+          sessionRestoredRef.current = true
+        }
+      } catch { /* corrupt/absent session */ }
+      return
+    }
     bridge.sessionLoad().then(async (res) => {
       if (!res.ok || !res.session) return
       // Use the live editor instance rather than the closure capture: in dev
@@ -215,6 +279,7 @@ export default function App() {
       setDocName(res.session.docName)
       setFilePath(res.session.filePath)
       setDirty(false)
+      sessionRestoredRef.current = true
       // Session restore bypasses openViaDialog, so read the sidecar here too —
       // otherwise a relaunch shows the doc with the default theme, and a later
       // save would overwrite its sidecar with that default.
@@ -320,7 +385,19 @@ export default function App() {
     scheduleSessionSave()
   }
 
+  // Open a document. DOCX/ODT are imported: text is extracted (via the same
+  // extractors used for chat reference context) and loaded as markdown.
   const openDocument = async (file: File) => {
+    const ext = file.name.toLowerCase().split('.').pop()
+    if (ext === 'docx' || ext === 'odt') {
+      const { extractOffice } = await import('./store/extract')
+      try {
+        loadMarkdown(await extractOffice(file), file.name.replace(/\.(docx|odt)$/i, '.md'))
+      } catch (err) {
+        flash(`Import failed: ${err}`)
+      }
+      return
+    }
     loadMarkdown(await file.text(), file.name)
   }
 
@@ -337,12 +414,34 @@ export default function App() {
     const choice = await bridge.chooseOpenPath()
     if (choice.canceled || !choice.filePath) return
     const res = await bridge.readFile({ filePath: choice.filePath })
-    if (!res.ok || res.content === undefined) { flash(`Open failed: ${res.error}`); return }
-    loadMarkdown(res.content, choice.filePath.split(/[\\/]/).pop() || choice.filePath, choice.filePath)
-    // Restore the document's sidecar theme if one was saved alongside it;
-    // otherwise fall back to the default theme so an unstyled doc doesn't
-    // inherit the previously-opened document's look.
-    if (bridge.readSidecar) {
+    if (!res.ok || (res.content === undefined && res.base64 === undefined)) {
+      flash(`Open failed: ${res.error}`); return
+    }
+    const name = choice.filePath.split(/[\\/]/).pop() || choice.filePath
+    if (res.base64) {
+      // Binary office import (Electron): decode base64 → File → shared extractor.
+      const bin = atob(res.base64)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      const { extractOffice } = await import('./store/extract')
+      try {
+        loadMarkdown(await extractOffice(new File([bytes], name)), name.replace(/\.(docx|odt)$/i, '.md'))
+      } catch (err) {
+        flash(`Import failed: ${err}`)
+        return
+      }
+    } else if (res.content !== undefined) {
+      loadMarkdown(res.content, name, choice.filePath)
+    }
+    // Binary office imports carry no saved theme; .md imports restore their
+    // sidecar .css. In a plain browser (res.base64 undefined, no bridge)
+    // neither applies.
+    if (res.base64) {
+      setTheme(DEFAULT_THEME); setThemeName('Default')
+    } else if (bridge.readSidecar) {
+      // Restore the document's sidecar theme if one was saved alongside it;
+      // otherwise fall back to the default theme so an unstyled doc doesn't
+      // inherit the previously-opened document's look.
       const sc = await bridge.readSidecar({ filePath: choice.filePath })
       if (sc.ok && sc.css) {
         setTheme(cssToTheme(sc.css))
@@ -356,8 +455,33 @@ export default function App() {
 
   // Save: in Electron, overwrite the current file directly; the save dialog
   // only appears on the first save of a new document ("Save As"). In a plain
-  // browser, fall back to a blob download.
+  // browser, fall back to a blob download — the first save of an untitled
+  // document asks for a file name (remembered until New/Open, and across
+  // reloads via the session), later saves download silently under that name.
+  const [pendingSaveName, setPendingSaveName] = useState<string | null>(null)
+  const confirmSaveName = () => {
+    let name = pendingSaveName!.trim() || 'untitled.md'
+    if (!/\.(md|markdown|txt)$/i.test(name)) name += '.md'
+    setDocName(name)
+    downloadBlob(new Blob([getMarkdown()], { type: 'text/markdown' }), name)
+    setDirty(false)
+    setPendingSaveName(null)
+    // Persist the chosen name in the session so it survives a reload.
+    scheduleSessionSave()
+  }
+  // Rename: click the doc name in the title bar. Same .md normalization and
+  // session persistence as the first-save prompt.
+  const [pendingRename, setPendingRename] = useState<string | null>(null)
+  const confirmRename = () => {
+    let name = pendingRename!.trim()
+    if (!name) { setPendingRename(null); return }
+    if (!/\.(md|markdown|txt)$/i.test(name)) name += '.md'
+    setDocName(name)
+    setPendingRename(null)
+    scheduleSessionSave()
+  }
   const saveDocument = async (forceDialog = false) => {
+    if (pendingSaveName !== null) return // name dialog already open
     const md = getMarkdown()
     const bridge = getBridge()
     if (bridge?.chooseSavePath && bridge?.writeFile) {
@@ -381,6 +505,10 @@ export default function App() {
         const sc = await bridge.writeSidecar({ filePath: path, css: themeToCss(theme) })
         if (!sc.ok) flash(`Style save failed: ${sc.error}`)
       }
+      return
+    }
+    if (docName === 'untitled.md') {
+      setPendingSaveName('untitled.md')
       return
     }
     downloadBlob(new Blob([md], { type: 'text/markdown' }), docName)
@@ -575,7 +703,7 @@ export default function App() {
         <span className="app-title">Apertus Writer</span>
         <button className="tb-btn" onClick={newDocument}>New</button>
         <button className="tb-btn" onClick={openViaDialog}>Open</button>
-        <input ref={openFileRef} type="file" accept=".md,.markdown,.txt" hidden
+        <input ref={openFileRef} type="file" accept=".md,.markdown,.txt,.docx,.odt" hidden
           onChange={(e) => e.target.files?.[0] && openDocument(e.target.files[0])} />
         <button className="tb-btn" onClick={() => saveDocument()}>Save{dirty ? ' •' : ''}</button>
         <span className="export-wrap">
@@ -589,7 +717,8 @@ export default function App() {
           )}
         </span>
         <span className="spacer" />
-        <span className="doc-name">{docName}</span>
+        <span className="doc-name" title="Rename document"
+          onClick={() => setPendingRename(docName)}>{docName}</span>
         <button className="tb-btn" title="Reference context for chat & autocomplete"
           onClick={() => setShowContext((v) => !v)}>
           📎 Context{contextCount > 0 ? ` (${contextCount})` : ''}
@@ -685,10 +814,34 @@ export default function App() {
         />
       )}
 
+      {pendingRename !== null && (
+        <PromptDialog
+          title="Rename document"
+          value={pendingRename}
+          onChange={setPendingRename}
+          confirmLabel="Rename"
+          onConfirm={confirmRename}
+          onCancel={() => setPendingRename(null)}
+        />
+      )}
+
+      {pendingSaveName !== null && (
+        <PromptDialog
+          title="Save document"
+          message="Choose a file name for the download — it will be remembered for this document."
+          value={pendingSaveName}
+          onChange={setPendingSaveName}
+          confirmLabel="Save"
+          onConfirm={confirmSaveName}
+          onCancel={() => setPendingSaveName(null)}
+        />
+      )}
+
       {showSettings && (
         <SettingsDialog
           settings={settings}
           keychainUnavailable={keychainUnavailable}
+          managed={settings.managed}
           onSave={(s) => { setSettings(s); saveSettings(s); setShowSettings(false) }}
           onClose={() => setShowSettings(false)}
         />

@@ -5,6 +5,7 @@ import { testConnection, type EndpointConfig } from '../api/openai'
 interface Props {
   settings: Settings
   keychainUnavailable?: boolean
+  managed?: { autocomplete: string; chat: string } | null
   onSave: (s: Settings) => void
   onClose: () => void
 }
@@ -58,7 +59,7 @@ function EndpointFields({
   )
 }
 
-export default function SettingsDialog({ settings, keychainUnavailable = false, onSave, onClose }: Props) {
+export default function SettingsDialog({ settings, keychainUnavailable = false, managed, onSave, onClose }: Props) {
   const [s, setS] = useState(settings)
 
   return (
@@ -92,21 +93,31 @@ export default function SettingsDialog({ settings, keychainUnavailable = false, 
             </label>
           </fieldset>
 
-          <EndpointFields
-            title="Autocomplete (base model, /completions)"
-            value={s.autocomplete}
-            onChange={(v) => setS({ ...s, autocomplete: v })}
-            testKind="completions"
-            keysLocked={keychainUnavailable}
-          />
+          {managed ? (
+            <p className="settings-note">
+              AI endpoints for this deployment are managed by the server host —
+              nothing to configure. Models: <strong>{managed.autocomplete}</strong>{' '}
+              (autocomplete), <strong>{managed.chat}</strong> (chat).
+            </p>
+          ) : (
+            <>
+              <EndpointFields
+                title="Autocomplete (base model, /completions)"
+                value={s.autocomplete}
+                onChange={(v) => setS({ ...s, autocomplete: v })}
+                testKind="completions"
+                keysLocked={keychainUnavailable}
+              />
 
-          <EndpointFields
-            title="Chat (instruct model, /chat/completions)"
-            value={s.chat}
-            onChange={(v) => setS({ ...s, chat: v })}
-            testKind="chat"
-            keysLocked={keychainUnavailable}
-          />
+              <EndpointFields
+                title="Chat (instruct model, /chat/completions)"
+                value={s.chat}
+                onChange={(v) => setS({ ...s, chat: v })}
+                testKind="chat"
+                keysLocked={keychainUnavailable}
+              />
+            </>
+          )}
         </div>
 
         <div className="modal-footer">

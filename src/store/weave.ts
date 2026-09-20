@@ -80,13 +80,14 @@ export function cleanCandidate(text: string): string {
   return t.trim()
 }
 
-// Two candidates per block: parallel requests at different temperatures.
-// Resolves to 1 or 2 non-empty candidates; both empty → resolves [''] (caller
-// treats a single empty string as a generation failure).
+// Two candidates per block at different temperatures so they genuinely differ.
+// Sequential (not parallel): firing both heavy requests at once spikes load on
+// slow gateways and trips their timeout — the cause of the 504s this replaced.
+// Each completes within the gateway's window instead. Resolves to 1 or 2
+// non-empty candidates; both empty → resolves [''] (caller treats a single
+// empty string as a generation failure).
 export async function generateCandidates(cfg: EndpointConfig, messages: ChatMessage[]): Promise<string[]> {
-  const [a, b] = await Promise.all([
-    chat(cfg, messages, { temperature: 0.7, maxTokens: 800, stop: [] }),
-    chat(cfg, messages, { temperature: 1.0, maxTokens: 800, stop: [] }),
-  ])
+  const a = await chat(cfg, messages, { temperature: 0.7, maxTokens: 400, stop: [] })
+  const b = await chat(cfg, messages, { temperature: 1.0, maxTokens: 400, stop: [] })
   return [cleanCandidate(a), cleanCandidate(b)]
 }

@@ -1,10 +1,10 @@
 // Generic client for any OpenAI-compatible endpoint
 // (LM Studio, Ollama, llama.cpp, vLLM, Public AI, OpenAI, etc.)
 //
-// When running inside Electron, requests are routed through the main process
-// (Node.js networking) so CORS never applies. In a plain browser, requests
-// go through fetch() directly and the endpoint must allow cross-origin
-// requests (LM Studio: enable CORS in server settings; Ollama: OLLAMA_ORIGINS).
+// CORS never applies in either mode: in Electron, requests are routed through
+// the main process (Node.js networking); in a plain browser they go through
+// the app server's proxy endpoint (server.mjs, POST /api/proxy). Both return
+// the same {ok,status,statusText,body} shape.
 
 // Bridge exposed by electron/preload.cjs (typed in store/bridge.ts)
 import { getBridge } from '../store/bridge'
@@ -26,33 +26,39 @@ function headers(cfg: EndpointConfig): Record<string, string> {
   return h
 }
 
+type ProxyResult = { ok: boolean; status: number; statusText: string; body: string }
+
 async function request(cfg: EndpointConfig, path: string, body: object): Promise<string> {
-  const url = `${cfg.baseUrl.replace(/\/$/, '')}${path}`
+  const args = {
+    url: `${cfg.baseUrl.replace(/\/$/, '')}${path}`,
+    method: 'POST' as const,
+    headers: headers(cfg),
+    body: JSON.stringify(body),
+  }
+  let res: ProxyResult
   const bridge = getBridge()
   if (bridge) {
     // Electron: CORS-free request via the main process
-    const res = await bridge.request({
-      url,
-      method: 'POST',
-      headers: headers(cfg),
-      body: JSON.stringify(body),
-    })
-    if (!res.ok) {
-      if (res.status === 0) throw new TypeError(res.statusText)
-      throw new Error(`${res.status} ${res.statusText}${res.body ? ` — ${res.body.slice(0, 200)}` : ''}`)
+    res = await bridge.request(args)
+  } else {
+    // Browser: CORS-free request via the app server's proxy
+    let resp: Response
+    try {
+      resp = await fetch('/api/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(args),
+      })
+    } catch {
+      throw new TypeError('Cannot reach the app server — web mode needs `npm start` (serves the app and the /api/proxy endpoint).')
     }
-    return res.body
+    res = await resp.json() as ProxyResult
   }
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: headers(cfg),
-    body: JSON.stringify(body),
-  })
   if (!res.ok) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(`${res.status} ${res.statusText}${detail ? ` — ${detail.slice(0, 200)}` : ''}`)
+    if (res.status === 0) throw new TypeError(res.statusText)
+    throw new Error(`${res.status} ${res.statusText}${res.body ? ` — ${res.body.slice(0, 200)}` : ''}`)
   }
-  return res.text()
+  return res.body
 }
 
 // Autocomplete uses the raw completions endpoint (not chat completions):
@@ -121,7 +127,7 @@ export async function testConnection(cfg: EndpointConfig, kind: 'completions' | 
     return null
   } catch (err) {
     return err instanceof TypeError
-      ? 'Network error — is the server running and reachable? (In a plain browser, the endpoint must also allow CORS; the Electron app has no such restriction.)'
+      ? `Network error — ${err.message}`
       : String(err)
   }
 }
