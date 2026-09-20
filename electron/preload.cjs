@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld('aiBridge', {
   chatLoad: (args) => ipcRenderer.invoke('chat-load', args),
   contextSave: (args) => ipcRenderer.invoke('context-save', args),
   contextLoad: (args) => ipcRenderer.invoke('context-load', args),
+  secretLoad: () => ipcRenderer.invoke('secret-load'),
+  secretSave: (args) => ipcRenderer.invoke('secret-save', args),
+  openExternal: (args) => ipcRenderer.invoke('open-external', args),
   onMenuAction: (callback) => {
     const listener = (_event, action) => callback(action)
     ipcRenderer.on('menu-action', listener)

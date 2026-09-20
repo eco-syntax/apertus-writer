@@ -1,10 +1,10 @@
 // Generic client for any OpenAI-compatible endpoint
 // (LM Studio, Ollama, llama.cpp, vLLM, Public AI, OpenAI, etc.)
 //
-// When running inside Electron, requests are routed through the main process
-// (Node.js networking) so CORS never applies. In a plain browser, requests
-// go through fetch() directly and the endpoint must allow cross-origin
-// requests (LM Studio: enable CORS in server settings; Ollama: OLLAMA_ORIGINS).
+// CORS never applies in either mode: in Electron, requests are routed through
+// the main process (Node.js networking); in a plain browser they go through
+// the app server's proxy endpoint (server.mjs, POST /api/proxy). Both return
+// the same {ok,status,statusText,body} shape.
 
 // Bridge exposed by electron/preload.cjs (typed in store/bridge.ts)
 import { getBridge } from '../store/bridge'
@@ -26,34 +26,39 @@ function headers(cfg: EndpointConfig): Record<string, string> {
   return h
 }
 
-async function request(cfg: EndpointConfig, path: string, body: object, signal?: AbortSignal): Promise<Response> {
-  const url = `${cfg.baseUrl.replace(/\/$/, '')}${path}`
+type ProxyResult = { ok: boolean; status: number; statusText: string; body: string }
+
+async function request(cfg: EndpointConfig, path: string, body: object): Promise<string> {
+  const args = {
+    url: `${cfg.baseUrl.replace(/\/$/, '')}${path}`,
+    method: 'POST' as const,
+    headers: headers(cfg),
+    body: JSON.stringify(body),
+  }
+  let res: ProxyResult
   const bridge = getBridge()
   if (bridge) {
     // Electron: CORS-free request via the main process
-    const res = await bridge.request({
-      url,
-      method: 'POST',
-      headers: headers(cfg),
-      body: JSON.stringify(body),
-    })
-    if (!res.ok) {
-      if (res.status === 0) throw new TypeError(res.statusText)
-      throw new Error(`${res.status} ${res.statusText}${res.body ? ` — ${res.body.slice(0, 200)}` : ''}`)
+    res = await bridge.request(args)
+  } else {
+    // Browser: CORS-free request via the app server's proxy
+    let resp: Response
+    try {
+      resp = await fetch('/api/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(args),
+      })
+    } catch {
+      throw new TypeError('Cannot reach the app server — web mode needs `npm start` (serves the app and the /api/proxy endpoint).')
     }
-    return new Response(res.body, { status: 200 })
+    res = await resp.json() as ProxyResult
   }
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: headers(cfg),
-    signal,
-    body: JSON.stringify(body),
-  })
   if (!res.ok) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(`${res.status} ${res.statusText}${detail ? ` — ${detail.slice(0, 200)}` : ''}`)
+    if (res.status === 0) throw new TypeError(res.statusText)
+    throw new Error(`${res.status} ${res.statusText}${res.body ? ` — ${res.body.slice(0, 200)}` : ''}`)
   }
-  return res
+  return res.body
 }
 
 // Autocomplete uses the raw completions endpoint (not chat completions):
@@ -62,33 +67,42 @@ async function request(cfg: EndpointConfig, path: string, body: object, signal?:
 export async function autocomplete(
   cfg: EndpointConfig,
   context: string,
-  signal?: AbortSignal,
 ): Promise<string> {
-  const res = await request(cfg, '/completions', {
+  const data = JSON.parse(await request(cfg, '/completions', {
     model: cfg.model,
     prompt: context,
     max_tokens: 48,
     temperature: 0.3,
     stop: ['\n\n', '</s>'],
-  }, signal)
-  const data = await res.json()
+  }))
   const text: string = data.choices?.[0]?.text ?? ''
   return text.replace(/\s+$/, '')
 }
 
-export async function chat(cfg: EndpointConfig, messages: ChatMessage[], maxTokens = 1024): Promise<string> {
-  const res = await request(cfg, '/chat/completions', {
+export interface ChatOptions {
+  temperature?: number
+  maxTokens?: number
+  // Stop sequences. When provided (even as an empty list), the built-in '---'
+  // hard cut below is disabled — weave needs legitimate '---' horizontal rules
+  // to survive generation.
+  stop?: string[]
+}
+
+export async function chat(cfg: EndpointConfig, messages: ChatMessage[], options: ChatOptions = {}): Promise<string> {
+  const data = JSON.parse(await request(cfg, '/chat/completions', {
     model: cfg.model,
     messages,
-    temperature: 0.7,
-    max_tokens: maxTokens,
-    stop: ['---'],
-  })
-  const data = await res.json()
+    temperature: options.temperature ?? 0.7,
+    max_tokens: options.maxTokens ?? 1024,
+    stop: options.stop ?? ['---'],
+  }))
   let text: string = data.choices?.[0]?.message?.content ?? ''
   // Belt-and-suspenders: some servers ignore `stop`; cut anything from '---' on
-  const cut = text.indexOf('---')
-  if (cut !== -1) text = text.slice(0, cut)
+  // (skipped when the caller supplies explicit stop sequences).
+  if (options.stop === undefined) {
+    const cut = text.indexOf('---')
+    if (cut !== -1) text = text.slice(0, cut)
+  }
   return text.trimEnd()
 }
 
@@ -98,24 +112,22 @@ export async function chat(cfg: EndpointConfig, messages: ChatMessage[], maxToke
 export async function testConnection(cfg: EndpointConfig, kind: 'completions' | 'chat' = 'chat'): Promise<string | null> {
   try {
     if (kind === 'completions') {
-      const res = await request(cfg, '/completions', {
+      await request(cfg, '/completions', {
         model: cfg.model,
         prompt: 'The capital of France is',
         max_tokens: 5,
       })
-      await res.json()
     } else {
-      const res = await request(cfg, '/chat/completions', {
+      await request(cfg, '/chat/completions', {
         model: cfg.model,
         messages: [{ role: 'user', content: 'Say "ok".' }],
         max_tokens: 5,
       })
-      await res.json()
     }
     return null
   } catch (err) {
     return err instanceof TypeError
-      ? 'Network error — is the server running and reachable? (In a plain browser, the endpoint must also allow CORS; the Electron app has no such restriction.)'
+      ? `Network error — ${err.message}`
       : String(err)
   }
 }

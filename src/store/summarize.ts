@@ -10,7 +10,7 @@ import {
 
 // Documents at or below this size are used verbatim — summarizing them would
 // only lose information.
-export const SUMMARIZE_THRESHOLD = 1500
+const SUMMARIZE_THRESHOLD = 1500
 
 const SUMMARY_TARGET_CHARS = 1200
 // Cap the input so the summarization request itself fits the context window.
@@ -35,7 +35,7 @@ export async function summarizeForAutocomplete(
         `Compress the following document ("${name}") to at most ${SUMMARY_TARGET_CHARS} characters:\n\n` +
         text.slice(0, SUMMARY_INPUT_CAP),
     },
-  ], 512)
+  ], { maxTokens: 512 })
   return result.slice(0, SUMMARY_TARGET_CHARS)
 }
 

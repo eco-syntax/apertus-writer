@@ -4,10 +4,26 @@
 // endpoint (local servers, third-party hosted APIs) without proxies.
 const { app, BrowserWindow, ipcMain, shell, dialog, Menu } = require('electron')
 const path = require('path')
+const { pathToFileURL } = require('url')
+const net = require('net')
+const http = require('http')
+const https = require('https')
+const dns = require('dns').promises
 const fs = require('fs')
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
 const isDev = !app.isPackaged
+
+// The only URL this window is ever allowed to host. The preload script exposes
+// window.aiBridge (approved-path read/write, secret-load, the ai-request
+// proxy) and is re-injected into every page loaded in the window, so a prefix
+// match (url.startsWith('http://localhost:5173') / 'file://') would let an
+// attacker load `http://localhost:5173.evil.com`, `http://localhost:5173@evil.com`,
+// or any `file:///...` page and inherit fully privileged aiBridge. Requiring the
+// navigation URL to equal the exact app start page (a parsed-origin comparison
+// would be defeated by file: URLs, whose origin is always "null") closes that
+// hole.
+const APP_START_URL = isDev ? DEV_URL : pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href
 
 // Disable GPU compositing: this app is plain DOM/CSS (no WebGL/canvas/video),
 // and a sleep/wake cycle resets the OS GPU device, which Chromium recovers from
@@ -115,10 +131,34 @@ function createWindow() {
     if (items.length > 0) Menu.buildFromTemplate(items).popup()
   })
 
-  // Open external links in the system browser
+  // Open external links in the system browser, but only http(s) URLs.
+  // shell.openExternal hands the URL straight to the OS, where protocols like
+  // file:, ms-msdt: or search-ms: are documented RCE/launch vectors on
+  // Windows — so anything outside http(s) is silently denied.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        shell.openExternal(parsed.toString())
+      }
+    } catch {
+      // Unparseable or non-http(s) URL — deny.
+    }
     return { action: 'deny' }
+  })
+
+  // Navigation guard: the privileged preload bridge is re-injected into every
+  // page loaded in this window, so a link click (or prompt-injected <a>) unlucky
+  // enough to navigate the window to an attacker page would hand window.aiBridge
+  // to that page. Only allow the main frame to navigate to the app's own start
+  // page — exactly, not a prefix-variant (see APP_START_URL); everything else is
+  // denied. Links are routed to the system browser via the open-external handler.
+  mainWindow.webContents.on('will-navigate', (e, url, frame) => {
+    // frame === mainFrame also keeps an injected <iframe> subframe from inheriting
+    // the privileged aiBridge.
+    if (frame !== mainWindow.webContents.mainFrame || url !== APP_START_URL) {
+      e.preventDefault()
+    }
   })
 
   if (isDev) {
@@ -136,11 +176,83 @@ function sessionPath() {
   return path.join(app.getPath('userData'), 'session.json')
 }
 
+// --- Dialog-approved path registry -----------------------------------------
+// The renderer may only read/write files the user has explicitly picked in a
+// native dialog. Provenance is tracked here in main (the renderer cannot add
+// to it); the renderer keeps paths for display/keying but they are not an I/O
+// authorization token. The list is persisted so a document restored from a
+// previous session stays usable after a relaunch.
+const APPROVED_PATHS_ERROR = 'Path not approved for this document'
+
+function approvedPathsPath() {
+  return path.join(app.getPath('userData'), 'approved-paths.json')
+}
+
+let approvedPaths = null
+
+function loadApprovedPaths() {
+  if (approvedPaths) return approvedPaths
+  try {
+    const raw = JSON.parse(fs.readFileSync(approvedPathsPath(), 'utf8'))
+    approvedPaths = new Set(Array.isArray(raw) ? raw.filter((p) => typeof p === 'string') : [])
+  } catch {
+    approvedPaths = new Set()
+  }
+  return approvedPaths
+}
+
+function persistApprovedPaths() {
+  try {
+    fs.writeFileSync(approvedPathsPath(), JSON.stringify([...loadApprovedPaths()]), 'utf8')
+  } catch {
+    // Best-effort: if the list can't be persisted the running app still works;
+    // after a relaunch the user simply has to pick the file in a dialog again.
+  }
+}
+
+// Resolve a renderer-supplied path to the canonical form used for allowlist
+// comparisons, or null when it is empty / not a string / contains a NUL. On
+// Windows, lowercase so case-spoofing can't defeat the comparison.
+function normalizePath(filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0 || filePath.includes('\0')) return null
+  const resolved = path.resolve(filePath)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+function isApproved(filePath) {
+  const resolved = normalizePath(filePath)
+  return resolved !== null && loadApprovedPaths().has(resolved)
+}
+
+function approve(filePath) {
+  const resolved = normalizePath(filePath)
+  if (resolved === null) return
+  const set = loadApprovedPaths()
+  if (set.has(resolved)) return
+  set.add(resolved)
+  persistApprovedPaths()
+}
+
+// Derive the sidecar .css path for a document, rejecting anything that isn't a
+// .css file sitting in the same directory as the (approved) document.
+function sidecarPath(filePath) {
+  const cssPath = filePath.replace(/\.(md|markdown|txt)$/i, '.css')
+  if (!/\.css$/i.test(cssPath)) return null
+  const docDir = normalizePath(path.dirname(filePath))
+  const cssDir = normalizePath(path.dirname(cssPath))
+  if (!docDir || !cssDir || docDir !== cssDir) return null
+  return cssPath
+}
+
 // IPC: persist the current working document. → { ok, error? }
 // args: { docName, filePath, content }
 ipcMain.handle('session-save', async (_event, { docName, filePath, content }) => {
   try {
-    const data = JSON.stringify({ docName, filePath, content })
+    // Never persist an unapproved path: a compromised renderer must not be able
+    // to plant a path that becomes "trusted" after a restart.
+    let safePath = null
+    if (filePath !== null && filePath !== undefined) safePath = isApproved(filePath) ? filePath : null
+    const data = JSON.stringify({ docName, filePath: safePath, content })
     fs.writeFileSync(sessionPath(), data, 'utf8')
     return { ok: true }
   } catch (err) {
@@ -154,11 +266,18 @@ ipcMain.handle('session-load', async () => {
     const raw = fs.readFileSync(sessionPath(), 'utf8')
     const session = JSON.parse(raw)
     if (typeof session.content !== 'string') return { ok: true, session: null }
+    // Restore the path only if it is still in the approved registry; a
+    // hand-edited session.json can't smuggle in a path that bypasses dialogs.
+    let filePath = null
+    if (typeof session.filePath === 'string' && isApproved(session.filePath)) {
+      approve(session.filePath)
+      filePath = session.filePath
+    }
     return {
       ok: true,
       session: {
         docName: typeof session.docName === 'string' ? session.docName : 'untitled.md',
-        filePath: typeof session.filePath === 'string' || session.filePath === null ? session.filePath : null,
+        filePath,
         content: session.content,
       },
     }
@@ -167,111 +286,233 @@ ipcMain.handle('session-load', async () => {
   }
 })
 
-// Chat history: one message thread per document, keyed by filePath (or
-// 'untitled:<docName>' for never-saved docs). Stored as a JSON map in userData
-// so a document's chat is restored when it is reopened. Mirrors session.json.
-function chatsPath() {
-  return path.join(app.getPath('userData'), 'chats.json')
-}
-
-function readChats() {
-  try {
-    return JSON.parse(fs.readFileSync(chatsPath(), 'utf8')) || {}
-  } catch {
-    return {}
+// One JSON map per file in userData: a `key → array` store (chats.json,
+// context.json). `valueKey` is the property name the renderer uses over IPC
+// (`messages` for chat, `items` for context), so save/load return that shape.
+function jsonStore(filename, valueKey) {
+  const file = () => path.join(app.getPath('userData'), filename)
+  function read() {
+    try {
+      return JSON.parse(fs.readFileSync(file(), 'utf8')) || {}
+    } catch {
+      return {}
+    }
+  }
+  return {
+    save: async (_event, args) => {
+      try {
+        const store = read()
+        const items = args[valueKey]
+        if (Array.isArray(items) && items.length === 0) delete store[args.key]
+        else store[args.key] = items
+        fs.writeFileSync(file(), JSON.stringify(store), 'utf8')
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: String(err) }
+      }
+    },
+    load: async (_event, args) => {
+      try {
+        const store = read()
+        const items = Array.isArray(store[args.key]) ? store[args.key] : []
+        return { ok: true, [valueKey]: items }
+      } catch {
+        return { ok: true, [valueKey]: [] }
+      }
+    },
   }
 }
 
-// IPC: persist a document's chat thread. args: { key, messages } → { ok }
-ipcMain.handle('chat-save', async (_event, { key, messages }) => {
+const chats = jsonStore('chats.json', 'messages')
+const context = jsonStore('context.json', 'items')
+ipcMain.handle('chat-save', chats.save)
+ipcMain.handle('chat-load', chats.load)
+ipcMain.handle('context-save', context.save)
+ipcMain.handle('context-load', context.load)
+
+// --- Secret store (API keys) ----------------------------------------------
+// LLM API keys are persisted with Electron safeStorage, which encrypts with
+// the OS keychain (DPAPI on Windows), so they are not left in plaintext in the
+// renderer's localStorage LevelDB on disk. The renderer holds non-secret
+// settings in localStorage and fetches/merges the keys through here at runtime.
+const { safeStorage } = require('electron')
+function secretsFile() { return path.join(app.getPath('userData'), 'secrets.enc') }
+
+ipcMain.handle('secret-load', async () => {
   try {
-    const store = readChats()
-    if (Array.isArray(messages) && messages.length === 0) delete store[key]
-    else store[key] = messages
-    fs.writeFileSync(chatsPath(), JSON.stringify(store), 'utf8')
-    return { ok: true }
+    const available = safeStorage.isEncryptionAvailable()
+    if (!available) return { ok: true, secrets: {}, available: false }
+    const buf = fs.readFileSync(secretsFile())
+    const json = safeStorage.decryptString(buf)
+    return { ok: true, secrets: JSON.parse(json || '{}'), available: true }
+  } catch { return { ok: true, secrets: {}, available: safeStorage.isEncryptionAvailable() } }
+})
+
+ipcMain.handle('secret-save', async (_event, { secrets }) => {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, available: false }
+    fs.writeFileSync(secretsFile(), safeStorage.encryptString(JSON.stringify(secrets || {})))
+    return { ok: true, available: true }
   } catch (err) {
-    return { ok: false, error: String(err) }
+    return { ok: false, error: String(err), available: true }
   }
 })
 
-// IPC: read a document's chat thread. args: { key } → { ok, messages }
-ipcMain.handle('chat-load', async (_event, { key }) => {
-  try {
-    const store = readChats()
-    const messages = Array.isArray(store[key]) ? store[key] : []
-    return { ok: true, messages }
-  } catch {
-    return { ok: true, messages: [] }
-  }
-})
-
-// Reference context (attached files/URLs): one set per document, keyed like
-// chat history. Stored as a JSON map in userData so a document's attachments
-// are restored when it is reopened. Mirrors chats.json.
-function contextPath() {
-  return path.join(app.getPath('userData'), 'context.json')
-}
-
-function readContextStore() {
-  try {
-    return JSON.parse(fs.readFileSync(contextPath(), 'utf8')) || {}
-  } catch {
-    return {}
-  }
-}
-
-// IPC: persist a document's reference context. args: { key, items } → { ok }
-ipcMain.handle('context-save', async (_event, { key, items }) => {
-  try {
-    const store = readContextStore()
-    if (Array.isArray(items) && items.length === 0) delete store[key]
-    else store[key] = items
-    fs.writeFileSync(contextPath(), JSON.stringify(store), 'utf8')
-    return { ok: true }
-  } catch (err) {
-    return { ok: false, error: String(err) }
-  }
-})
-
-// IPC: read a document's reference context. args: { key } → { ok, items }
-ipcMain.handle('context-load', async (_event, { key }) => {
-  try {
-    const store = readContextStore()
-    const items = Array.isArray(store[key]) ? store[key] : []
-    return { ok: true, items }
-  } catch {
-    return { ok: true, items: [] }
-  }
+// IPC: open an external link in the system browser. Only http/https URLs are
+// allowed — guards against javascript:/file:/custom-protocol handlers being
+// handed to the OS. Used by chat link clicks so they open externally instead
+// of navigating (and exposing the preload bridge to) the app window.
+ipcMain.handle('open-external', async (_event, { url }) => {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return
+  try { await shell.openExternal(url) } catch { /* best-effort */ }
 })
 
 // IPC: perform an HTTP request on behalf of the renderer.
 // args: { url, method, headers, body } → { ok, status, statusText, body }
+// Validate a renderer-supplied request URL to limit the SSRF surface of the
+// main-process HTTP proxy. Allows http/https only, GET/POST only, and rejects
+// the link-local range 169.254.0.0/16 — where AWS/Azure/GCP expose the cloud
+// instance-metadata service and where credentials live — in every spelling:
+// dotted IPv4, IPv6-mapped (`[::ffff:169.254.169.254]`, which URL normalises
+// to hex `[::ffff:a9fe:a9fe]`), and any address returned by a hostile DNS.
+// ponytail: LAN/loopback are deliberately allowed — the app's legitimate use
+// is arbitrary OpenAI-compatible endpoints, including localhost/LAN servers —
+// so only the credential-exfil vector (link-local metadata) is blocked.
+//
+// The request uses the *resolved* address, not the original hostname: after a
+// host resolves here it is pinned for the actual connection (custom lookup),
+// so a DNS rebinding / TOCTOU between validation and fetch can't slip a
+// blocked address in. Redirects are not auto-followed — following an
+// attacker-controlled Location would re-resolve an arbitrary host.
+const isLinkLocal = (addr) => {
+  if (/^169\.254\./.test(addr)) return true // IPv4 link-local
+  const mapped = /^::ffff:(.+)$/i.exec(addr) // IPv4-mapped IPv6
+  return mapped ? /^169\.254\./.test(embeddedIPv4(mapped[1])) : false
+}
+
+// Embedded IPv4 from the tail of an IPv4-mapped IPv6 address: accepts the
+// dotted form (`169.254.169.254`) and the two-hex-group form (`a9fe:a9fe`).
+function embeddedIPv4(part) {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(part)) return part
+  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(part)
+  if (!hex) return null
+  const bytes = (hex[1].padStart(4, '0') + hex[2].padStart(4, '0')).match(/../g)
+  return bytes.map((b) => parseInt(b, 16)).join('.')
+}
+
+// Validate the renderer-supplied URL and return its parsed form. Scheme is
+// restricted to http/https (blocking file:, javascript:, etc.).
+function parseRequestUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') throw new Error('Invalid URL')
+  let parsed
+  try { parsed = new URL(rawUrl) } catch { throw new Error('Invalid URL') }
+  if (!/^https?:$/.test(parsed.protocol)) throw new Error('Blocked scheme')
+  return parsed
+}
+
+// Resolve a host to concrete addresses and verify none is link-local. IP
+// literals (including IPv6-mapped) are validated directly — no DNS needed.
+// Returns the verified address list, which the fetch then pins.
+async function resolveSafeAddresses(host) {
+  if (net.isIP(host)) {
+    if (isLinkLocal(host)) throw new Error('Blocked host')
+    return [host]
+  }
+  const looked = await dns.lookup(host, { all: true, verbatim: true })
+  if (looked.length === 0) throw new Error('Blocked host')
+  if (looked.some((r) => isLinkLocal(r.address))) throw new Error('Blocked host')
+  return looked.map((r) => r.address)
+}
+
+// A net.lookup-compatible function that pins every connection to the already
+// validated addresses so the OS never re-resolves the hostname (no TOCTOU).
+function pinnedLookup(addresses) {
+  return (hostname, options, callback) => {
+    const entries = addresses.map((a) => ({ address: a, family: a.includes(':') ? 6 : 4 }))
+    if (options && options.all) callback(null, entries)
+    else callback(null, entries[0].address, entries[0].family)
+  }
+}
+
+// Perform the HTTP(S) request against the pinned addresses, returning the same
+// shape the previous fetch() produced.
+function rawFetch(parsed, method, headers, body, addresses) {
+  const lib = parsed.protocol === 'https:' ? https : http
+  const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80)
+  const host = parsed.hostname.replace(/^\[|\]$/g, '')
+  return new Promise((resolve, reject) => {
+    const req = lib.request(
+      {
+        protocol: parsed.protocol,
+        hostname: host,
+        port,
+        path: parsed.pathname + parsed.search,
+        method,
+        headers,
+        lookup: pinnedLookup(addresses),
+      },
+      (res) => {
+        const chunks = []
+        res.on('data', (c) => chunks.push(c))
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            body: text,
+          })
+        })
+      }
+    )
+    req.on('error', reject)
+    if (body != null) req.write(typeof body === 'string' ? body : Buffer.from(body))
+    req.end()
+  })
+}
+
 ipcMain.handle('ai-request', async (_event, { url, method, headers, body }) => {
   try {
-    const res = await fetch(url, { method, headers, body })
-    const text = await res.text()
-    return { ok: res.ok, status: res.status, statusText: res.statusText, body: text }
+    const parsed = parseRequestUrl(url)
+    if (method !== undefined && method !== 'GET' && method !== 'POST') {
+      return { ok: false, status: 0, statusText: 'Blocked method', body: '' }
+    }
+    const host = parsed.hostname.replace(/^\[|\]$/g, '')
+    const addresses = await resolveSafeAddresses(host)
+    const result = await rawFetch(parsed, method || 'GET', headers, body, addresses)
+    return result
   } catch (err) {
     return { ok: false, status: 0, statusText: String(err), body: '' }
   }
 })
 
-// IPC: show an open dialog for markdown/text files. → { canceled, filePath? }
+// IPC: show an open dialog for documents. → { canceled, filePath? }
 // Needed because Chromium only shows a file chooser on a user activation, so a
 // menu-triggered input.click() in the renderer is silently ignored.
 ipcMain.handle('choose-open-path', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog({
     properties: ['openFile'],
-    filters: [{ name: 'Markdown/Text', extensions: ['md', 'markdown', 'txt'] }],
+    filters: [
+      { name: 'Documents', extensions: ['md', 'markdown', 'txt', 'docx', 'odt'] },
+    ],
   })
   if (canceled || filePaths.length === 0) return { canceled: true }
+  approve(filePaths[0])
   return { canceled: false, filePath: filePaths[0] }
 })
 
-// IPC: read a UTF-8 text file. → { ok, content?, error? }
+// IPC: read a file. Text documents come back as UTF-8 `content`; binary office
+// docs (docx/odt) as `base64` for the renderer to import. → { ok, content?,
+// base64?, error? }
 ipcMain.handle('read-file', async (_event, { filePath }) => {
   try {
+    if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
+    if (/\.(docx|odt)$/i.test(filePath)) {
+      return { ok: true, base64: fs.readFileSync(filePath).toString('base64') }
+    }
+    if (!/\.(md|markdown|txt)$/i.test(filePath)) {
+      return { ok: false, error: APPROVED_PATHS_ERROR }
+    }
     return { ok: true, content: fs.readFileSync(filePath, 'utf8') }
   } catch (err) {
     return { ok: false, error: String(err) }
@@ -291,6 +532,7 @@ ipcMain.handle('choose-export-path', async (_event, { docName }) => {
     ],
   })
   if (canceled || !filePath) return { canceled: true }
+  approve(filePath)
   const format = (filePath.match(/\.(docx|odt|pdf)$/i)?.[1] || 'docx').toLowerCase()
   return { canceled: false, filePath, format }
 })
@@ -305,13 +547,17 @@ ipcMain.handle('choose-save-path', async (_event, { docName }) => {
     ],
   })
   if (canceled || !filePath) return { canceled: true }
+  approve(filePath)
   return { canceled: false, filePath }
 })
 
-// IPC: write base64-encoded bytes to a file. → { ok, error? }
-ipcMain.handle('write-file', async (_event, { filePath, base64 }) => {
+// IPC: write bytes/text to a file. Text saves pass `text` (UTF-8, no base64
+// round-trip); binary exports pass `base64`. → { ok, error? }
+ipcMain.handle('write-file', async (_event, { filePath, base64, text }) => {
   try {
-    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'))
+    if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
+    if (typeof text === 'string') fs.writeFileSync(filePath, text, 'utf8')
+    else fs.writeFileSync(filePath, Buffer.from(base64, 'base64'))
     return { ok: true }
   } catch (err) {
     return { ok: false, error: String(err) }
@@ -323,7 +569,9 @@ ipcMain.handle('write-file', async (_event, { filePath, base64 }) => {
 // extension with .css. → { ok, error? }
 ipcMain.handle('write-sidecar', async (_event, { filePath, css }) => {
   try {
-    const cssPath = filePath.replace(/\.(md|markdown|txt)$/i, '.css')
+    if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
+    const cssPath = sidecarPath(filePath)
+    if (!cssPath) return { ok: false, error: APPROVED_PATHS_ERROR }
     fs.writeFileSync(cssPath, css, 'utf8')
     return { ok: true }
   } catch (err) {
@@ -336,7 +584,9 @@ ipcMain.handle('write-sidecar', async (_event, { filePath, css }) => {
 // opens with the default theme). → { ok, css? }
 ipcMain.handle('read-sidecar', async (_event, { filePath }) => {
   try {
-    const cssPath = filePath.replace(/\.(md|markdown|txt)$/i, '.css')
+    if (!isApproved(filePath)) return { ok: false, css: null }
+    const cssPath = sidecarPath(filePath)
+    if (!cssPath) return { ok: false, css: null }
     if (!fs.existsSync(cssPath)) return { ok: true, css: null }
     return { ok: true, css: fs.readFileSync(cssPath, 'utf8') }
   } catch (err) {
@@ -366,11 +616,27 @@ ipcMain.handle('print-document', async (_event, { html, css }) => {
 })
 
 function buildPrintableHtml(html, css) {
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
-    ${css}
+  // Defense in depth: theme CSS comes from a (possibly untrusted) sidecar .css
+  // and is already angle-bracket-rejected on load (cssToTheme); strip any stray
+  // `<` here too so it can never close the <style> block. CSS has no legitimate
+  // use for `<`.
+  const safeCss = css.replace(/</g, '')
+  // CSP blocks any script in the offscreen data-URL document (theme values,
+  // document HTML) — print/PDF only needs styles + the body markup.
+  return `<!doctype html><html><head><meta charset="utf-8">` +
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">` +
+    `<style>
+    ${safeCss}
+    @page { size: letter; margin: 20mm; }
     body { font-family: var(--doc-font); font-size: var(--doc-font-size);
            color: var(--doc-text-color); background: var(--doc-bg);
            max-width: var(--doc-max-width); margin: 0 auto; padding: 24px; line-height: 1.65; }
+    @media print {
+      body { max-width: 100% !important; padding: 0; }
+      table { table-layout: fixed; word-break: break-word; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+      td, p { overflow-wrap: break-word; }
+    }
     h1,h2,h3,h4 { color: var(--doc-heading-color); }
     a { color: var(--doc-accent); }
     code { font-family: var(--doc-code-font); background: var(--doc-code-bg); padding: 0.15em 0.35em; border-radius: 4px; }
@@ -387,12 +653,13 @@ function buildPrintableHtml(html, css) {
 // IPC: render themed HTML to a PDF file via printToPDF (preserves CSS exactly).
 // args: { filePath, html, css } → { ok, error? }
 ipcMain.handle('export-pdf-to', async (_event, { filePath, html, css }) => {
+  if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
   const fullHtml = buildPrintableHtml(html, css)
   let win = null
   try {
     win = new BrowserWindow({ show: false, webPreferences: { offscreen: true } })
     await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(fullHtml))
-    const pdf = await win.webContents.printToPDF({ printBackground: true })
+    const pdf = await win.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true })
     fs.writeFileSync(filePath, pdf)
     return { ok: true }
   } catch (err) {

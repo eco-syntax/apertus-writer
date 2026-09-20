@@ -11,9 +11,10 @@ Unlike traditional markdown editors, there is no code/preview split — you edit
 - **Toolbar ribbon**: bold, italic, strikethrough, inline code, code blocks, headings 1–4, bullet/numbered lists, blockquotes, tables, images, horizontal rules, undo/redo
 - **CSS style themes**: edit fonts, colors, sizes, and page width live; save/load themes as standalone `.css` files
 - **AI autocomplete**: press **Ctrl-Space** and a ghost-text suggestion appears (grey italic); **Tab** accepts it, any other key or action dismisses it — or enable the toolbar's **✨ Auto** toggle to get suggestions automatically after a short typing pause (persists across sessions). Defaults to `apertus-v1.1-4b` on a local LM Studio Server. Reference documents attached via 📎 Context (files or URLs) are wrapped in `<s>…</s>` document-boundary tokens and prepended to the prompt, so suggestions match their style and content. Long references are automatically compressed by the instruct model in the background (⏳ chip while summarizing) to fit the context window; if the prompt still overflows, autocomplete retries once without references
-- **Chat sidebar**: talk about your document with an AI model (defaults to `apertus-v1.1-4b-instruct` on LM Studio). The current document is included as context by default (toggleable); you can also attach other files (`.md`, `.txt`, `.pdf`, `.docx`, `.odt` — text is extracted from the binary formats) or paste URLs as extra context
+- **AI placeholder blocks & 🪄 Weave**: insert a placeholder block (**🧩 Placeholder**) anywhere and type a one-sentence description of what should go there. Hit **🪄 Weave** and the app walks every placeholder, generates **two candidate replacements** with the chat model (seeded with the surrounding document text so style and tense match), and shows them side by side — pick one, or dismiss both and write your own. Skipped blocks stay as placeholders; the editor is read-only while weaving and the run can be cancelled at any point (already-woven blocks are kept). Placeholders save to markdown as a standalone `[[ai: your description]]` line, so they survive save/open, session restore, and hand-editing in code view
+- **Chat sidebar**: talk about your document with an AI model (defaults to `apertus-v1.1-4b-instruct` on LM Studio). The current document is included as context by default (toggleable); you can also attach other files (`.md`, `.txt`, `.pdf`, `.docx`, `.odt` — text is extracted from the binary formats) or paste URLs as extra context. The chat model also powers 🪄 Weave
 - **Any OpenAI-compatible endpoint** works for both features (LM Studio, Public AI, OpenAI, Ollama…) — configure base URL, model, and API key in ⚙️ Settings, with a built-in "Test connection" button
-- **Export to Word (.docx), OpenDocument (.odt), and PDF** with the active CSS theme applied — docx/odt are generated in-app with the theme mapped to native styles (fonts, colors, sizes, code shading, table styling), no external tools required; PDF is rendered from the themed HTML directly
+- **Export to Word (.docx), OpenDocument (.odt), and PDF** with the active CSS theme applied — docx/odt are generated in-app with the theme mapped to native styles (fonts, colors, sizes, code shading, table styling), no external tools required; PDF is rendered from the themed HTML directly. **Import** works the other way too: **Open** accepts **.docx** and **.odt** files, extracting their text into a markdown document
 - **Session restore** (Electron): the working document is autosaved ~1 second after your last edit and restored on relaunch, so the app reopens whatever you were working on — even after a restart or power cycle — instead of the welcome page. Closing with unsaved changes prompts the native "discard changes?" confirmation first
 
 ## Getting started
@@ -34,11 +35,32 @@ npm install
 npm run dev:electron
 ```
 
-**Plain browser** — works too, but the endpoint must allow cross-origin requests (LM Studio: enable CORS in server settings; Ollama: set `OLLAMA_ORIGINS`):
+**Plain browser / shared web mode** — one small Node server serves the built app and proxies AI requests, so CORS never applies and any endpoint works:
 
 ```bash
-npm run dev   # then open http://localhost:5173
+npm run build
+npm start   # PORT env var overrides, default http://localhost:8787
 ```
+
+For development, `npm run dev` starts the server and Vite together (hot reload at http://localhost:5173, API proxied to the server).
+
+Two ways to run it for others:
+
+- **Managed mode (recommended for sharing)** — set env vars before `npm start` and visitors get a working app with zero setup; endpoints and the API key never reach the browser:
+
+  ```bash
+  APERTUS_BASE_URL=https://api.example.com/v1 \
+  APERTUS_API_KEY=sk-… \
+  APERTUS_AUTOCOMPLETE_MODEL=apertus-v1.1-4b \
+  APERTUS_CHAT_MODEL=apertus-v1.1-4b-instruct \
+  npm start
+  ```
+
+  `APERTUS_CHAT_MODEL` defaults to `APERTUS_AUTOCOMPLETE_MODEL` if unset. Each feature can also point at a different server (e.g. local LM Studio for autocomplete, cloud for chat): `APERTUS_AUTOCOMPLETE_BASE_URL` / `APERTUS_CHAT_BASE_URL` and `APERTUS_AUTOCOMPLETE_API_KEY` / `APERTUS_CHAT_API_KEY` override the shared base URL / key. The chat feature additionally falls back to the `PUBLICAI_BASE` / `PUBLICAI_MODEL` / `PUBLICAI_API_KEY` environment variables (after explicit `APERTUS_CHAT_*`, before the shared `APERTUS_*`), so a host with Public AI creds set system-wide only needs to configure the local autocomplete endpoint. Note the endpoint settings UI is hidden for visitors and anyone with the URL spends the host's key — add auth/rate limiting in front if that matters.
+
+- **Bring-your-own-key mode** — no env vars: each visitor configures their own OpenAI-compatible endpoint (Settings). Only public https endpoints are reachable (localhost/ LAN targets are blocked server-side), and API keys are stored in the visitor's browser localStorage.
+
+In both browser modes the working document autosaves to the browser's localStorage and is restored on reopen (per browser, no cross-device sync). Chat history, reference context, and settings persist the same way.
 
 ### Prerequisites
 
@@ -60,6 +82,8 @@ To use a different provider (e.g. the [Public AI Inference Utility](https://plat
 | Accept suggestion | Tab |
 | Dismiss suggestion | Esc (or just keep typing) |
 | Toggle raw markdown code view | Ctrl-Shift-M or "</> Code" in the toolbar |
+| Insert an AI placeholder block | "🧩 Placeholder" in the toolbar → type the one-sentence description in the box |
+| Expand placeholders with AI | "🪄 Weave" in the toolbar → choose one of two candidates per block, or write your own |
 | Style theme | 🎨 Styles panel → tweak values → "Save theme .css" |
 | Chat | 💬 Chat sidebar → pick local or cloud model |
 

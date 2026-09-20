@@ -1,6 +1,7 @@
 // Shared store for extra reference context (files / URLs) attached by the
-// user. Both the chat sidebar and autocomplete read from this list, so items
-// added in one place apply to both features.
+// user. The chat sidebar reads full content; autocomplete and weave include
+// budgeted excerpts via budgetedRefs — so items added in one place apply to
+// all three features.
 import { useSyncExternalStore } from 'react'
 import { getBridge } from './bridge'
 
@@ -22,6 +23,21 @@ function emit() {
 
 export function getContextItems(): ExtraContext[] {
   return items
+}
+
+// Budgeted reference excerpts for autocomplete and weave prompts: prefer the
+// instruct-model summary, fall back to a raw 1000-char head excerpt while
+// summarization is pending or if it failed; skip items that no longer fit.
+// Returns copies with content replaced by the excerpt.
+export function budgetedRefs(budget: number): ExtraContext[] {
+  const out: ExtraContext[] = []
+  for (const r of items) {
+    const text = r.summary || r.content.slice(0, 1000)
+    if (text.length > budget) continue
+    budget -= text.length
+    out.push({ ...r, content: text })
+  }
+  return out
 }
 
 export function addContextItems(added: ExtraContext[]) {
