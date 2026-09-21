@@ -62,6 +62,8 @@ Two ways to run it for others:
 
 In both browser modes the working document autosaves to the browser's localStorage and is restored on reopen (per browser, no cross-device sync). Chat history, reference context, and settings persist the same way.
 
+**Server-hosted file storage (optional, admin-controlled)** — by default the Save button downloads an `.md` file. If the admin starts the server with `APERTUS_STORAGE_DIR` set to an existing folder, visitors instead save/load documents **on the server** in that folder: **Save** writes the current document there and **Open** shows a picker of the files it contains. Unset = the default download-based behavior (the folder option is not presented). Only the file basename is used and is resolved strictly inside the folder, so web visitors can't read or write outside it.
+
 ### Prerequisites
 
 On first launch the app opens a built-in quick-start page with the setup steps below, so you can follow along without this README.

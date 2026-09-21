@@ -17,10 +17,12 @@ import SettingsDialog from './components/SettingsDialog'
 import { Autocomplete } from './components/Autocomplete'
 import { AiPlaceholder } from './components/PlaceholderBlock'
 import WeaveDialog from './components/WeaveDialog'
+import ServerFilesDialog from './components/ServerFilesDialog'
 import { markdownToHtml, htmlToMarkdown } from './store/markdown'
 import { collectPlaceholders } from './store/weave'
 import { loadSettings, saveSettings, loadSecretKeys, loadManagedConfig, type Settings } from './store/settings'
 import { getBridge, blobToBase64 } from './store/bridge'
+import { loadStorageConfig, writeServerFile, type StorageConfig } from './store/storage'
 import { budgetedRefs, useContextItems, setContextItems } from './store/context'
 import ContextPanel from './components/ContextPanel'
 import * as ai from './api/openai'
@@ -89,6 +91,11 @@ export default function App() {
   const contextCount = contextItems.length
   const sessionKey = chatKey(filePath, docName)
   const [dirty, setDirty] = useState(false)
+  // Server-hosted storage (web mode, admin-controlled). When enabled, Save
+  // writes to the server folder and Open lists/loads from it instead of
+  // forcing downloads.
+  const [storage, setStorage] = useState<StorageConfig>({ enabled: false, folder: null })
+  const [showServerFiles, setShowServerFiles] = useState(false)
   const [codeView, setCodeView] = useState(false)
   const [codeText, setCodeText] = useState('')
   const openFileRef = useRef<HTMLInputElement>(null)
@@ -128,6 +135,10 @@ export default function App() {
       setSettings(next)
       const migrated = (!keys.autocomplete && prev.autocomplete.apiKey) || (!keys.chat && prev.chat.apiKey)
       if (getBridge()?.secretSave && migrated) saveSettings(next)
+      // Web-mode server storage: enabled only when the admin set
+      // APERTUS_STORAGE_DIR on the server (loadStorageConfig tolerates it
+      // being off / not managed — it just reports disabled).
+      loadStorageConfig().then((cfg) => { if (!cancelled) setStorage(cfg) })
     })
     return () => { cancelled = true }
   }, [])
@@ -381,6 +392,12 @@ export default function App() {
     scheduleSessionSave()
   }
 
+  // Load a file picked from the admin-designated server folder into the editor.
+  const openServerFile = (name: string, content: string) => {
+    loadMarkdown(content, name)
+    setShowServerFiles(false)
+  }
+
   // Open a document. DOCX/ODT are imported: text is extracted (via the same
   // extractors used for chat reference context) and loaded as markdown.
   const openDocument = async (file: File) => {
@@ -403,6 +420,12 @@ export default function App() {
   // browser, fall back to the input (real clicks provide activation).
   const openViaDialog = async () => {
     const bridge = getBridge()
+    // Web mode with admin-enabled server storage: show the server file picker
+    // instead of the local file chooser / download-based open.
+    if (!bridge && storage.enabled) {
+      setShowServerFiles(true)
+      return
+    }
     if (!bridge?.chooseOpenPath) {
       openFileRef.current?.click()
       return
@@ -459,7 +482,15 @@ export default function App() {
     let name = pendingSaveName!.trim() || 'untitled.md'
     if (!/\.(md|markdown|txt)$/i.test(name)) name += '.md'
     setDocName(name)
-    downloadBlob(new Blob([getMarkdown()], { type: 'text/markdown' }), name)
+    // Server-storage mode writes to the folder on the server; default mode
+    // downloads the file locally.
+    if (storage.enabled && !getBridge()) {
+      writeServerFile(name, getMarkdown())
+        .then(() => flash(`Saved to server as ${name}`))
+        .catch((err) => flash(`Save failed: ${err}`))
+    } else {
+      downloadBlob(new Blob([getMarkdown()], { type: 'text/markdown' }), name)
+    }
     setDirty(false)
     setPendingSaveName(null)
     // Persist the chosen name in the session so it survives a reload.
@@ -480,6 +511,24 @@ export default function App() {
     if (pendingSaveName !== null) return // name dialog already open
     const md = getMarkdown()
     const bridge = getBridge()
+    // Web mode with admin-enabled server storage: write to the server folder
+    // (first save of an untitled doc prompts for a name, later saves reuse it).
+    if (!bridge && storage.enabled) {
+      let name = docName
+      if (name === 'untitled.md' || forceDialog) {
+        setPendingSaveName('untitled.md')
+        return
+      }
+      try {
+        await writeServerFile(name, md)
+        setDirty(false)
+        scheduleSessionSave()
+        flash(`Saved to server as ${name}`)
+      } catch (err) {
+        flash(`Save failed: ${err}`)
+      }
+      return
+    }
     if (bridge?.chooseSavePath && bridge?.writeFile) {
       let path = filePath
       if (!path || forceDialog) {
@@ -807,6 +856,14 @@ export default function App() {
           cfg={settings.chat}
           onApply={applyWovenText}
           onClose={closeWeave}
+        />
+      )}
+
+      {showServerFiles && (
+        <ServerFilesDialog
+          folder={storage.folder}
+          onOpen={openServerFile}
+          onClose={() => setShowServerFiles(false)}
         />
       )}
 
