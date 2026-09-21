@@ -11,6 +11,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import dns from 'node:dns/promises'
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const PORT = Number(process.env.PORT) || 8787
@@ -93,6 +94,29 @@ const MIME = {
   '.woff': 'font/woff', '.woff2': 'font/woff2', '.md': 'text/markdown',
 }
 
+// --- Server-hosted file storage (web mode, optional) ------------------------
+// Admin controls the option: when APERTUS_STORAGE_DIR points at a folder, web
+// users can save/load .md documents there (server-side, not forced downloads);
+// when it is unset, the default download-based save/load remains. The env var
+// also controls whether the client even shows the server-storage UI. Only the
+// basename is used and it is resolved strictly inside STORAGE_DIR so a caller
+// can never read or write outside the designated folder.
+let STORAGE_DIR = null
+if (process.env.APERTUS_STORAGE_DIR) {
+  STORAGE_DIR = path.resolve(process.env.APERTUS_STORAGE_DIR)
+  try { mkdirSync(STORAGE_DIR, { recursive: true }) } catch { STORAGE_DIR = null }
+  if (STORAGE_DIR) console.log(`Server file storage enabled → ${STORAGE_DIR}`)
+}
+
+// Resolve a user-supplied file name to a path strictly inside STORAGE_DIR.
+function storagePath(name) {
+  const base = path.basename(String(name ?? ''))
+  if (!base || base === '.' || base === '..') throw new Error('Invalid file name')
+  const abs = path.join(STORAGE_DIR, base)
+  if (abs !== STORAGE_DIR && !abs.startsWith(STORAGE_DIR + path.sep)) throw new Error('Invalid file path')
+  return abs
+}
+
 function serveStatic(res, pathname) {
   let file = path.normalize(path.join(DIST, pathname))
   if (!file.startsWith(DIST)) return reply(res, 403, 'Forbidden', 'text/plain')
@@ -118,6 +142,37 @@ function serveStatic(res, pathname) {
 // endpoint in Settings and it is forwarded as-is (https-only, public hosts).
 // ponytail: bind to loopback via HOST=127.0.0.1 and/or set PROXY_PASSWORD so
 // network peers can't drain the host's key or use this as an open relay.
+// --- server file-storage API ------------------------------------------------
+function handleStorage(req, res, url) {
+  if (!STORAGE_DIR) return reply(res, 404, JSON.stringify({ ok: false, error: 'Server storage not enabled' }))
+  const origin = req.headers.origin
+  if (origin && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) {
+    return reply(res, 403, JSON.stringify({ ok: false, error: 'Blocked origin' }))
+  }
+  if (req.method === 'GET' && url.pathname === '/api/storage/list') {
+    const files = readdirSync(STORAGE_DIR).filter((f) => {
+      try { return statSync(path.join(STORAGE_DIR, f)).isFile() } catch { return false }
+    })
+    return reply(res, 200, JSON.stringify({ ok: true, files }))
+  }
+  if (req.method !== 'POST') return reply(res, 405, JSON.stringify({ ok: false, error: 'Method not allowed' }))
+  return readBody(req).then((raw) => {
+    let body
+    try { body = JSON.parse(raw) } catch { return reply(res, 400, JSON.stringify({ ok: false, error: 'Bad JSON' })) }
+    if (url.pathname === '/api/storage/read') {
+      const abs = storagePath(body.name)
+      if (!existsSync(abs)) return reply(res, 404, JSON.stringify({ ok: false, error: 'Not found' }))
+      return reply(res, 200, JSON.stringify({ ok: true, content: readFileSync(abs, 'utf8') }))
+    }
+    if (url.pathname === '/api/storage/write') {
+      const abs = storagePath(body.name)
+      writeFileSync(abs, String(body.content ?? ''))
+      return reply(res, 200, JSON.stringify({ ok: true }))
+    }
+    return reply(res, 404, JSON.stringify({ ok: false, error: 'Not found' }))
+  }).catch((e) => reply(res, 400, JSON.stringify({ ok: false, error: String(e?.message ?? e) })))
+}
+
 const stripSlash = (u) => (u || '').replace(/\/$/, '')
 const env = (name, fallback = '') => process.env[name] ?? fallback
 const MANAGED = (env('APERTUS_BASE_URL') || env('APERTUS_AUTOCOMPLETE_BASE_URL') || env('APERTUS_CHAT_BASE_URL') || env('PUBLICAI_BASE'))
@@ -140,16 +195,24 @@ if (MANAGED && (!MANAGED.autocomplete.model || !MANAGED.autocomplete.baseUrl || 
 
 const server = http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/api/config') {
-      // Model names only — the base URL and key stay server-side.
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+    if (req.method === 'GET' && url.pathname === '/api/config') {
+      const storageEnabled = !!STORAGE_DIR
+      // Model names only — the base URL and key stay server-side. Storage info
+      // leaf reveals whether server-hosted save/load is on (admin-controlled
+      // via APERTUS_STORAGE_DIR); folder name is presentational only.
       return reply(res, 200, JSON.stringify({
         managed: !!MANAGED,
         proxyAuth: !!PROXY_PASSWORD,
         autocomplete: MANAGED?.autocomplete.model ?? null,
         chat: MANAGED?.chat.model ?? null,
+        storage: { enabled: storageEnabled, folder: storageEnabled ? path.basename(STORAGE_DIR) : null },
       }))
     }
-    if (req.method === 'POST' && req.url === '/api/proxy') {
+    if (url.pathname.startsWith('/api/storage')) {
+      return handleStorage(req, res, url)
+    }
+    if (req.method === 'POST' && url.pathname === '/api/proxy') {
       if (!hasProxySecret(req)) {
         return reply(res, 401, JSON.stringify({ ok: false, status: 0, statusText: 'Unauthorized', body: '' }))
       }
@@ -192,7 +255,7 @@ const server = http.createServer(async (req, res) => {
         return reply(res, 200, JSON.stringify({ ok: false, status: 0, statusText: String(err?.message ?? err), body: '' }))
       }
     }
-    serveStatic(res, req.url.split('?')[0])
+    serveStatic(res, url.pathname)
   } catch (err) {
     reply(res, 500, JSON.stringify({ ok: false, status: 0, statusText: String(err), body: '' }))
   }

@@ -17,10 +17,12 @@ import SettingsDialog from './components/SettingsDialog'
 import { Autocomplete } from './components/Autocomplete'
 import { AiPlaceholder } from './components/PlaceholderBlock'
 import WeaveDialog from './components/WeaveDialog'
+import ServerFilesDialog from './components/ServerFilesDialog'
 import { markdownToHtml, htmlToMarkdown } from './store/markdown'
 import { collectPlaceholders } from './store/weave'
 import { loadSettings, saveSettings, loadSecretKeys, loadManagedConfig, type Settings } from './store/settings'
 import { getBridge, blobToBase64 } from './store/bridge'
+import { loadStorageConfig, writeServerFile, type StorageConfig } from './store/storage'
 import { budgetedRefs, useContextItems, setContextItems } from './store/context'
 import ContextPanel from './components/ContextPanel'
 import * as ai from './api/openai'
@@ -89,6 +91,11 @@ export default function App() {
   const contextCount = contextItems.length
   const sessionKey = chatKey(filePath, docName)
   const [dirty, setDirty] = useState(false)
+  // Server-hosted storage (web mode, admin-controlled). When enabled, Save
+  // writes to the server folder and Open lists/loads from it instead of
+  // forcing downloads.
+  const [storage, setStorage] = useState<StorageConfig>({ enabled: false, folder: null })
+  const [showServerFiles, setShowServerFiles] = useState(false)
   const [codeView, setCodeView] = useState(false)
   const [codeText, setCodeText] = useState('')
   const openFileRef = useRef<HTMLInputElement>(null)
@@ -129,6 +136,10 @@ export default function App() {
       setSettings(next)
       const migrated = (!keys.autocomplete && prev.autocomplete.apiKey) || (!keys.chat && prev.chat.apiKey)
       if (getBridge()?.secretSave && migrated) saveSettings(next)
+      // Web-mode server storage: enabled only when the admin set
+      // APERTUS_STORAGE_DIR on the server (loadStorageConfig tolerates it
+      // being off / not managed — it just reports disabled).
+      loadStorageConfig().then((cfg) => { if (!cancelled) setStorage(cfg) })
     })
     return () => { cancelled = true }
   }, [])
@@ -382,7 +393,25 @@ export default function App() {
     scheduleSessionSave()
   }
 
+  // Load a file picked from the admin-designated server folder into the editor.
+  const openServerFile = (name: string, content: string) => {
+    loadMarkdown(content, name)
+    setShowServerFiles(false)
+  }
+
+  // Open a document. DOCX/ODT are imported: text is extracted (via the same
+  // extractors used for chat reference context) and loaded as markdown.
   const openDocument = async (file: File) => {
+    const ext = file.name.toLowerCase().split('.').pop()
+    if (ext === 'docx' || ext === 'odt') {
+      const { extractOffice } = await import('./store/extract')
+      try {
+        loadMarkdown(await extractOffice(file), file.name.replace(/\.(docx|odt)$/i, '.md'))
+      } catch (err) {
+        flash(`Import failed: ${err}`)
+      }
+      return
+    }
     loadMarkdown(await file.text(), file.name)
   }
 
@@ -392,6 +421,12 @@ export default function App() {
   // browser, fall back to the input (real clicks provide activation).
   const openViaDialog = async () => {
     const bridge = getBridge()
+    // Web mode with admin-enabled server storage: show the server file picker
+    // instead of the local file chooser / download-based open.
+    if (!bridge && storage.enabled) {
+      setShowServerFiles(true)
+      return
+    }
     if (!bridge?.chooseOpenPath) {
       openFileRef.current?.click()
       return
@@ -399,12 +434,34 @@ export default function App() {
     const choice = await bridge.chooseOpenPath()
     if (choice.canceled || !choice.filePath) return
     const res = await bridge.readFile({ filePath: choice.filePath })
-    if (!res.ok || res.content === undefined) { flash(`Open failed: ${res.error}`); return }
-    loadMarkdown(res.content, choice.filePath.split(/[\\/]/).pop() || choice.filePath, choice.filePath)
-    // Restore the document's sidecar theme if one was saved alongside it;
-    // otherwise fall back to the default theme so an unstyled doc doesn't
-    // inherit the previously-opened document's look.
-    if (bridge.readSidecar) {
+    if (!res.ok || (res.content === undefined && res.base64 === undefined)) {
+      flash(`Open failed: ${res.error}`); return
+    }
+    const name = choice.filePath.split(/[\\/]/).pop() || choice.filePath
+    if (res.base64) {
+      // Binary office import (Electron): decode base64 → File → shared extractor.
+      const bin = atob(res.base64)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      const { extractOffice } = await import('./store/extract')
+      try {
+        loadMarkdown(await extractOffice(new File([bytes], name)), name.replace(/\.(docx|odt)$/i, '.md'))
+      } catch (err) {
+        flash(`Import failed: ${err}`)
+        return
+      }
+    } else if (res.content !== undefined) {
+      loadMarkdown(res.content, name, choice.filePath)
+    }
+    // Binary office imports carry no saved theme; .md imports restore their
+    // sidecar .css. In a plain browser (res.base64 undefined, no bridge)
+    // neither applies.
+    if (res.base64) {
+      setTheme(DEFAULT_THEME); setThemeName('Default')
+    } else if (bridge.readSidecar) {
+      // Restore the document's sidecar theme if one was saved alongside it;
+      // otherwise fall back to the default theme so an unstyled doc doesn't
+      // inherit the previously-opened document's look.
       const sc = await bridge.readSidecar({ filePath: choice.filePath })
       if (sc.ok && sc.css) {
         setTheme(cssToTheme(sc.css))
@@ -426,7 +483,15 @@ export default function App() {
     let name = pendingSaveName!.trim() || 'untitled.md'
     if (!/\.(md|markdown|txt)$/i.test(name)) name += '.md'
     setDocName(name)
-    downloadBlob(new Blob([getMarkdown()], { type: 'text/markdown' }), name)
+    // Server-storage mode writes to the folder on the server; default mode
+    // downloads the file locally.
+    if (storage.enabled && !getBridge()) {
+      writeServerFile(name, getMarkdown())
+        .then(() => flash(`Saved to server as ${name}`))
+        .catch((err) => flash(`Save failed: ${err}`))
+    } else {
+      downloadBlob(new Blob([getMarkdown()], { type: 'text/markdown' }), name)
+    }
     setDirty(false)
     setPendingSaveName(null)
     // Persist the chosen name in the session so it survives a reload.
@@ -447,6 +512,24 @@ export default function App() {
     if (pendingSaveName !== null) return // name dialog already open
     const md = getMarkdown()
     const bridge = getBridge()
+    // Web mode with admin-enabled server storage: write to the server folder
+    // (first save of an untitled doc prompts for a name, later saves reuse it).
+    if (!bridge && storage.enabled) {
+      let name = docName
+      if (name === 'untitled.md' || forceDialog) {
+        setPendingSaveName('untitled.md')
+        return
+      }
+      try {
+        await writeServerFile(name, md)
+        setDirty(false)
+        scheduleSessionSave()
+        flash(`Saved to server as ${name}`)
+      } catch (err) {
+        flash(`Save failed: ${err}`)
+      }
+      return
+    }
     if (bridge?.chooseSavePath && bridge?.writeFile) {
       let path = filePath
       if (!path || forceDialog) {
@@ -666,7 +749,7 @@ export default function App() {
         <span className="app-title">Apertus Writer</span>
         <button className="tb-btn" onClick={newDocument}>New</button>
         <button className="tb-btn" onClick={openViaDialog}>Open</button>
-        <input ref={openFileRef} type="file" accept=".md,.markdown,.txt" hidden
+        <input ref={openFileRef} type="file" accept=".md,.markdown,.txt,.docx,.odt" hidden
           onChange={(e) => e.target.files?.[0] && openDocument(e.target.files[0])} />
         <button className="tb-btn" onClick={() => saveDocument()}>Save{dirty ? ' •' : ''}</button>
         <span className="export-wrap">
@@ -774,6 +857,14 @@ export default function App() {
           cfg={settings.chat}
           onApply={applyWovenText}
           onClose={closeWeave}
+        />
+      )}
+
+      {showServerFiles && (
+        <ServerFilesDialog
+          folder={storage.folder}
+          onOpen={openServerFile}
+          onClose={() => setShowServerFiles(false)}
         />
       )}
 

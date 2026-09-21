@@ -4,11 +4,26 @@
 // endpoint (local servers, third-party hosted APIs) without proxies.
 const { app, BrowserWindow, ipcMain, shell, dialog, Menu } = require('electron')
 const path = require('path')
+const { pathToFileURL } = require('url')
+const net = require('net')
+const http = require('http')
+const https = require('https')
 const dns = require('dns').promises
 const fs = require('fs')
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
 const isDev = !app.isPackaged
+
+// The only URL this window is ever allowed to host. The preload script exposes
+// window.aiBridge (approved-path read/write, secret-load, the ai-request
+// proxy) and is re-injected into every page loaded in the window, so a prefix
+// match (url.startsWith('http://localhost:5173') / 'file://') would let an
+// attacker load `http://localhost:5173.evil.com`, `http://localhost:5173@evil.com`,
+// or any `file:///...` page and inherit fully privileged aiBridge. Requiring the
+// navigation URL to equal the exact app start page (a parsed-origin comparison
+// would be defeated by file: URLs, whose origin is always "null") closes that
+// hole.
+const APP_START_URL = isDev ? DEV_URL : pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href
 
 // Disable GPU compositing: this app is plain DOM/CSS (no WebGL/canvas/video),
 // and a sleep/wake cycle resets the OS GPU device, which Chromium recovers from
@@ -133,14 +148,17 @@ function createWindow() {
   })
 
   // Navigation guard: the privileged preload bridge is re-injected into every
-  // page loaded in this window, so a link click (or prompt-injected <a>) that
-  // navigates the window to a remote origin would hand window.aiBridge to an
-  // attacker. Only allow navigation to the app's own origin (the dev server in
-  // dev, file:// in the packaged app); everything else is denied. Links are
-  // routed to the system browser via the open-external handler above.
-  mainWindow.webContents.on('will-navigate', (e, url) => {
-    const allowed = isDev ? DEV_URL : 'file://'
-    if (!url.startsWith(allowed)) e.preventDefault()
+  // page loaded in this window, so a link click (or prompt-injected <a>) unlucky
+  // enough to navigate the window to an attacker page would hand window.aiBridge
+  // to that page. Only allow the main frame to navigate to the app's own start
+  // page — exactly, not a prefix-variant (see APP_START_URL); everything else is
+  // denied. Links are routed to the system browser via the open-external handler.
+  mainWindow.webContents.on('will-navigate', (e, url, frame) => {
+    // frame === mainFrame also keeps an injected <iframe> subframe from inheriting
+    // the privileged aiBridge.
+    if (frame !== mainWindow.webContents.mainFrame || url !== APP_START_URL) {
+      e.preventDefault()
+    }
   })
 
   if (isDev) {
@@ -353,65 +371,146 @@ ipcMain.handle('open-external', async (_event, { url }) => {
 // args: { url, method, headers, body } → { ok, status, statusText, body }
 // Validate a renderer-supplied request URL to limit the SSRF surface of the
 // main-process HTTP proxy. Allows http/https only, GET/POST only, and rejects
-// hostnames that resolve to the link-local range 169.254.0.0/16 (the cloud
-// instance-metadata service) before fetching.
-// ponytail: cannot block all private/loopback ranges — the app's legitimate
-// use is arbitrary OpenAI-compatible endpoints, including localhost/LAN
-// servers, so only the credential-exfil vector (link-local metadata) is
-// blocked. DNS rebinding / TOCTOU between resolve and fetch remains a ceiling;
-// a full SSRF fix would need an endpoint allowlist, which is a product call.
-const BLOCKED_HOST_RE = /^169\.254\./
-async function assertSafeRequestUrl(rawUrl) {
+// the link-local range 169.254.0.0/16 — where AWS/Azure/GCP expose the cloud
+// instance-metadata service and where credentials live — in every spelling:
+// dotted IPv4, IPv6-mapped (`[::ffff:169.254.169.254]`, which URL normalises
+// to hex `[::ffff:a9fe:a9fe]`), and any address returned by a hostile DNS.
+// ponytail: LAN/loopback are deliberately allowed — the app's legitimate use
+// is arbitrary OpenAI-compatible endpoints, including localhost/LAN servers —
+// so only the credential-exfil vector (link-local metadata) is blocked.
+//
+// The request uses the *resolved* address, not the original hostname: after a
+// host resolves here it is pinned for the actual connection (custom lookup),
+// so a DNS rebinding / TOCTOU between validation and fetch can't slip a
+// blocked address in. Redirects are not auto-followed — following an
+// attacker-controlled Location would re-resolve an arbitrary host.
+const isLinkLocal = (addr) => {
+  if (/^169\.254\./.test(addr)) return true // IPv4 link-local
+  const mapped = /^::ffff:(.+)$/i.exec(addr) // IPv4-mapped IPv6
+  return mapped ? /^169\.254\./.test(embeddedIPv4(mapped[1])) : false
+}
+
+// Embedded IPv4 from the tail of an IPv4-mapped IPv6 address: accepts the
+// dotted form (`169.254.169.254`) and the two-hex-group form (`a9fe:a9fe`).
+function embeddedIPv4(part) {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(part)) return part
+  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(part)
+  if (!hex) return null
+  const bytes = (hex[1].padStart(4, '0') + hex[2].padStart(4, '0')).match(/../g)
+  return bytes.map((b) => parseInt(b, 16)).join('.')
+}
+
+// Validate the renderer-supplied URL and return its parsed form. Scheme is
+// restricted to http/https (blocking file:, javascript:, etc.).
+function parseRequestUrl(rawUrl) {
   if (typeof rawUrl !== 'string') throw new Error('Invalid URL')
   let parsed
   try { parsed = new URL(rawUrl) } catch { throw new Error('Invalid URL') }
   if (!/^https?:$/.test(parsed.protocol)) throw new Error('Blocked scheme')
-  const host = parsed.hostname
-  // IP-literal hosts: block the metadata range directly.
-  if (BLOCKED_HOST_RE.test(host)) throw new Error('Blocked host')
-  // Hostnames: resolve and reject if any address is link-local.
-  try {
-    const looked = await dns.lookup(host, { all: true })
-    if (looked.some((a) => BLOCKED_HOST_RE.test(a.address))) throw new Error('Blocked host')
-  } catch (e) {
-    // lookup failures (e.g. IPv6-only / non-resolvable) are surfaced by fetch
-    // below; only our explicit block should reject here.
-    if (String(e) === 'Error: Blocked host') throw e
+  return parsed
+}
+
+// Resolve a host to concrete addresses and verify none is link-local. IP
+// literals (including IPv6-mapped) are validated directly — no DNS needed.
+// Returns the verified address list, which the fetch then pins.
+async function resolveSafeAddresses(host) {
+  if (net.isIP(host)) {
+    if (isLinkLocal(host)) throw new Error('Blocked host')
+    return [host]
   }
+  const looked = await dns.lookup(host, { all: true, verbatim: true })
+  if (looked.length === 0) throw new Error('Blocked host')
+  if (looked.some((r) => isLinkLocal(r.address))) throw new Error('Blocked host')
+  return looked.map((r) => r.address)
+}
+
+// A net.lookup-compatible function that pins every connection to the already
+// validated addresses so the OS never re-resolves the hostname (no TOCTOU).
+function pinnedLookup(addresses) {
+  return (hostname, options, callback) => {
+    const entries = addresses.map((a) => ({ address: a, family: a.includes(':') ? 6 : 4 }))
+    if (options && options.all) callback(null, entries)
+    else callback(null, entries[0].address, entries[0].family)
+  }
+}
+
+// Perform the HTTP(S) request against the pinned addresses, returning the same
+// shape the previous fetch() produced.
+function rawFetch(parsed, method, headers, body, addresses) {
+  const lib = parsed.protocol === 'https:' ? https : http
+  const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80)
+  const host = parsed.hostname.replace(/^\[|\]$/g, '')
+  return new Promise((resolve, reject) => {
+    const req = lib.request(
+      {
+        protocol: parsed.protocol,
+        hostname: host,
+        port,
+        path: parsed.pathname + parsed.search,
+        method,
+        headers,
+        lookup: pinnedLookup(addresses),
+      },
+      (res) => {
+        const chunks = []
+        res.on('data', (c) => chunks.push(c))
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            body: text,
+          })
+        })
+      }
+    )
+    req.on('error', reject)
+    if (body != null) req.write(typeof body === 'string' ? body : Buffer.from(body))
+    req.end()
+  })
 }
 
 ipcMain.handle('ai-request', async (_event, { url, method, headers, body }) => {
   try {
-    await assertSafeRequestUrl(url)
+    const parsed = parseRequestUrl(url)
     if (method !== undefined && method !== 'GET' && method !== 'POST') {
       return { ok: false, status: 0, statusText: 'Blocked method', body: '' }
     }
-    const res = await fetch(url, { method, headers, body })
-    const text = await res.text()
-    return { ok: res.ok, status: res.status, statusText: res.statusText, body: text }
+    const host = parsed.hostname.replace(/^\[|\]$/g, '')
+    const addresses = await resolveSafeAddresses(host)
+    const result = await rawFetch(parsed, method || 'GET', headers, body, addresses)
+    return result
   } catch (err) {
     return { ok: false, status: 0, statusText: String(err), body: '' }
   }
 })
 
-// IPC: show an open dialog for markdown/text files. → { canceled, filePath? }
+// IPC: show an open dialog for documents. → { canceled, filePath? }
 // Needed because Chromium only shows a file chooser on a user activation, so a
 // menu-triggered input.click() in the renderer is silently ignored.
 ipcMain.handle('choose-open-path', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog({
     properties: ['openFile'],
-    filters: [{ name: 'Markdown/Text', extensions: ['md', 'markdown', 'txt'] }],
+    filters: [
+      { name: 'Documents', extensions: ['md', 'markdown', 'txt', 'docx', 'odt'] },
+    ],
   })
   if (canceled || filePaths.length === 0) return { canceled: true }
   approve(filePaths[0])
   return { canceled: false, filePath: filePaths[0] }
 })
 
-// IPC: read a UTF-8 text file. → { ok, content?, error? }
+// IPC: read a file. Text documents come back as UTF-8 `content`; binary office
+// docs (docx/odt) as `base64` for the renderer to import. → { ok, content?,
+// base64?, error? }
 ipcMain.handle('read-file', async (_event, { filePath }) => {
   try {
-    // Reads are limited to dialog-approved markdown/text documents.
-    if (!isApproved(filePath) || !/\.(md|markdown|txt)$/i.test(filePath)) {
+    if (!isApproved(filePath)) return { ok: false, error: APPROVED_PATHS_ERROR }
+    if (/\.(docx|odt)$/i.test(filePath)) {
+      return { ok: true, base64: fs.readFileSync(filePath).toString('base64') }
+    }
+    if (!/\.(md|markdown|txt)$/i.test(filePath)) {
       return { ok: false, error: APPROVED_PATHS_ERROR }
     }
     return { ok: true, content: fs.readFileSync(filePath, 'utf8') }
