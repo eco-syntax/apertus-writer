@@ -8,6 +8,8 @@
 // APERTUS_AUTOCOMPLETE_BASE_URL / APERTUS_CHAT_BASE_URL, models, and optional
 // per-feature API keys — see below.
 import http from 'node:http'
+import https from 'node:https'
+import net from 'node:net'
 import fs from 'node:fs'
 import path from 'node:path'
 import dns from 'node:dns/promises'
@@ -28,9 +30,13 @@ const PROXY_PASSWORD = process.env.PROXY_PASSWORD
 // restricted to public http(s) hosts: no localhost/loopback, private or
 // link-local ranges (cloud metadata service), and non-http schemes. Users'
 // endpoints are cloud APIs (LM Studio/Ollama are local-only by nature and
-// unreachable from a hosted browser anyway).
-// ponytail: DNS rebinding / TOCTOU between resolve and fetch remains; a full
-// fix needs an endpoint allowlist, which is a product call.
+// unreachable from a hosted browser anyway). The request is then pinned to the
+// already-validated addresses (pinnedLookup), so the connection can't re-resolve
+// the hostname and slip in a private IP between the check and the fetch (no
+// DNS-rebinding / TOCTOU). Redirects are not auto-followed either, since a
+// hostile Location header would re-resolve an arbitrary host.
+// ponytail: not following redirects may break hosts that redirect to another
+// public endpoint; add explicit redirect handling if that ever matters.
 function isPrivateIp(ip) {
   if (ip.includes('.')) {
     const [a, b] = ip.split('.').map(Number)
@@ -41,18 +47,71 @@ function isPrivateIp(ip) {
   return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6)
 }
 
+// Validate a user-supplied URL and return the concrete addresses to connect to
+// (for pinning). IP literals (incl. IPv6-mapped) are validated directly; other
+// hosts are resolved once and every address checked against the blocklist.
 async function assertSafeTarget(rawUrl) {
   let parsed
   try { parsed = new URL(rawUrl) } catch { throw new Error('Invalid URL') }
   if (!/^https?:$/.test(parsed.protocol)) throw new Error('Blocked scheme')
-  if (isPrivateIp(parsed.hostname)) throw new Error('Blocked host')
-  try {
-    const addrs = await dns.lookup(parsed.hostname, { all: true })
-    if (addrs.some((a) => isPrivateIp(a.address))) throw new Error('Blocked host')
-  } catch (e) {
-    // Only our explicit block rejects here; lookup failures surface via fetch.
-    if (String(e).endsWith('Blocked host')) throw e
+  const host = parsed.hostname.replace(/^\[|\]$/g, '')
+  if (net.isIP(host)) {
+    if (isPrivateIp(host)) throw new Error('Blocked host')
+    return [{ address: host, family: net.isIP(host) === 6 ? 6 : 4 }]
   }
+  const addrs = await dns.lookup(host, { all: true, verbatim: true })
+  if (addrs.length === 0 || addrs.some((a) => isPrivateIp(a.address))) {
+    throw new Error('Blocked host')
+  }
+  return addrs
+}
+
+// A net.lookup-compatible function that pins every connection to the already
+// validated addresses so the OS never re-resolves the hostname (no TOCTOU).
+function pinnedLookup(addresses) {
+  return (hostname, options, callback) => {
+    const entries = addresses.map((a) => ({ address: a.address, family: a.family }))
+    if (options && options.all) callback(null, entries)
+    else callback(null, entries[0].address, entries[0].family)
+  }
+}
+
+// POST against the pinned addresses, returning the same {ok,status,statusText,
+// body} shape global fetch produces. Redirects are not auto-followed (a hostile
+// Location would re-resolve an arbitrary host).
+function pinnedFetch(parsed, headers, body, addresses) {
+  const lib = parsed.protocol === 'https:' ? https : http
+  const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80)
+  const host = parsed.hostname.replace(/^\[|\]$/g, '')
+  return new Promise((resolve, reject) => {
+    const req = lib.request(
+      {
+        protocol: parsed.protocol,
+        hostname: host,
+        port,
+        path: parsed.pathname + parsed.search,
+        method: 'POST',
+        headers,
+        lookup: pinnedLookup(addresses),
+      },
+      (res) => {
+        const chunks = []
+        res.on('data', (c) => chunks.push(c))
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            body: text,
+          })
+        })
+      },
+    )
+    req.on('error', reject)
+    if (body != null) req.write(body)
+    req.end()
+  })
 }
 
 // --- shared-secret auth -----------------------------------------------------
@@ -239,7 +298,13 @@ const server = http.createServer(async (req, res) => {
         if (feature.key) upstreamHeaders.Authorization = `Bearer ${feature.key}`
       }
       try {
-        if (userSuppliedUrl) await assertSafeTarget(url)
+        if (userSuppliedUrl) {
+          // Guard + connect pinned to the addresses it validated (no TOCTOU).
+          const addresses = await assertSafeTarget(url)
+          const upstream = await pinnedFetch(new URL(url), upstreamHeaders, args.body, addresses)
+          return reply(res, 200, JSON.stringify(upstream))
+        }
+        // Managed target is operator-configured and trusted, so plain fetch.
         const upstream = await fetch(url, {
           method: 'POST',
           headers: upstreamHeaders,
@@ -278,6 +343,12 @@ if (process.argv[2] === '--check') {
   assert(!isPrivateIp('8.8.8.8'), 'public v4 allowed')
   assert(!isPrivateIp('172.32.0.1'), '172.32 is public')
   assert(!isPrivateIp('2606:4700::1'), 'public v6 allowed')
+  // pinnedLookup must ignore the hostname it's asked to resolve and return the
+  // pre-validated addresses — that's what closes the DNS-rebinding TOCTOU.
+  const pin = pinnedLookup([{ address: '8.8.8.8', family: 4 }])
+  const once = (h, o) => new Promise((res) => pin(h, o, (e, a) => res(a)))
+  const out = await once('attacker.tv', {}) // any hostname → still pinned address
+  assert(out === '8.8.8.8', 'pinned lookup ignores hostname')
   console.log('SSRF guard self-check passed')
   process.exit(0)
 }
