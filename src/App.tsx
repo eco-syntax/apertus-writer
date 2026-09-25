@@ -20,7 +20,7 @@ import WeaveDialog from './components/WeaveDialog'
 import ServerFilesDialog from './components/ServerFilesDialog'
 import { markdownToHtml, htmlToMarkdown } from './store/markdown'
 import { collectPlaceholders } from './store/weave'
-import { loadSettings, saveSettings, loadSecretKeys, loadManagedConfig, type Settings } from './store/settings'
+import { loadSettings, saveSettings, loadSecretKeys, secretKeysFromEnvActive, loadManagedConfig, type Settings } from './store/settings'
 import { getBridge, blobToBase64 } from './store/bridge'
 import { loadStorageConfig, writeServerFile, type StorageConfig } from './store/storage'
 import { budgetedRefs, useContextItems, setContextItems } from './store/context'
@@ -108,11 +108,15 @@ export default function App() {
   // Load API keys from the main-process safeStorage store (encrypted at rest)
   // and merge them into settings. Migrates any legacy plaintext keys left in
   // localStorage on first load: persists them to safeStorage and strips them
-  // from localStorage via saveSettings.
+  // from localStorage via saveSettings. When safeStorage is unavailable, keys
+  // are read from environment variables (never plaintext localStorage); we
+  // track that so the settings dialog can surface a notice.
+  const [keychainUnavailable, setKeychainUnavailable] = useState(false)
   useEffect(() => {
     let cancelled = false
     void Promise.all([loadSecretKeys(), loadManagedConfig()]).then(([keys, managed]) => {
       if (cancelled) return
+      setKeychainUnavailable(secretKeysFromEnvActive())
       const prev = settingsRef.current
       const next: Settings = {
         ...prev,
@@ -901,6 +905,7 @@ export default function App() {
       {showSettings && (
         <SettingsDialog
           settings={settings}
+          keychainUnavailable={keychainUnavailable}
           managed={settings.managed}
           onSave={(s) => { setSettings(s); saveSettings(s); setShowSettings(false) }}
           onClose={() => setShowSettings(false)}
