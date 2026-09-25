@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { Settings } from '../store/settings'
 import { testConnection, type EndpointConfig } from '../api/openai'
+import { getBridge } from '../store/bridge'
 
 interface Props {
   settings: Settings
@@ -91,6 +92,12 @@ export default function SettingsDialog({ settings, keychainUnavailable = false, 
                 onChange={(e) => setS({ ...s, spellcheckEnabled: e.target.checked })} />
               Enable spell check
             </label>
+            {!getBridge() && (
+              <label>Proxy password (match server's PROXY_PASSWORD, web mode only)
+                <input type="password" value={s.proxyPassword} placeholder="Leave empty if the server has none"
+                  onChange={(e) => setS({ ...s, proxyPassword: e.target.value })} />
+              </label>
+            )}
           </fieldset>
 
           {managed ? (

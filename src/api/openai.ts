@@ -9,6 +9,13 @@
 // Bridge exposed by electron/preload.cjs (typed in store/bridge.ts)
 import { getBridge } from '../store/bridge'
 
+// Shared secret for the web-mode proxy (server.mjs PROXY_PASSWORD). Set once
+// at app startup (App.tsx) from persisted settings; sent as X-Auth-Token with
+// every /api/proxy call so authenticated deployments keep working. Inert in
+// Electron, where requests bypass the HTTP proxy entirely.
+let proxyPassword = ''
+export function setProxyPassword(pw: string) { proxyPassword = pw }
+
 export interface EndpointConfig {
   baseUrl: string // e.g. http://localhost:1234/v1 or https://api.publicai.co/v1
   apiKey: string  // may be empty for local servers
@@ -44,9 +51,11 @@ async function request(cfg: EndpointConfig, path: string, body: object): Promise
     // Browser: CORS-free request via the app server's proxy
     let resp: Response
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (proxyPassword) headers['X-Auth-Token'] = proxyPassword
       resp = await fetch('/api/proxy', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(args),
       })
     } catch {

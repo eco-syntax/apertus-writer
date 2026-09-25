@@ -16,6 +16,12 @@ import { fileURLToPath } from 'node:url'
 
 const PORT = Number(process.env.PORT) || 8787
 const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist')
+// Optional shared secret for /api/proxy. When set, every proxy request must
+// carry it (X-Auth-Token header or Authorization: Bearer <secret>); otherwise
+// the endpoint is open to anyone who can reach the server — see hasProxySecret.
+// Bind to loopback (HOST=127.0.0.1) if the app is only for local use.
+const HOST = process.env.HOST
+const PROXY_PASSWORD = process.env.PROXY_PASSWORD
 
 // --- SSRF guard -------------------------------------------------------------
 // The proxy is reachable by anyone who can reach the server, so targets are
@@ -47,6 +53,18 @@ async function assertSafeTarget(rawUrl) {
     // Only our explicit block rejects here; lookup failures surface via fetch.
     if (String(e).endsWith('Blocked host')) throw e
   }
+}
+
+// --- shared-secret auth -----------------------------------------------------
+// The proxy forwards to host-configured/paid upstreams, so an unauthenticated
+// endpoint doubles as an open relay and lets any network peer burn the host's
+// API key. Origin is not a security control (curl and other servers omit it),
+// so when PROXY_PASSWORD is set we require the secret explicitly.
+function hasProxySecret(req) {
+  if (!PROXY_PASSWORD) return true
+  const bearer = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]
+  const token = req.headers['x-auth-token']
+  return token === PROXY_PASSWORD || bearer === PROXY_PASSWORD
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -122,8 +140,8 @@ function serveStatic(res, pathname) {
 // _API_KEY/_MODEL, falling back to the PUBLICAI_BASE/_MODEL/_API_KEY vars,
 // then the shared APERTUS ones. Unset = BYOK mode: users configure their own
 // endpoint in Settings and it is forwarded as-is (https-only, public hosts).
-// ponytail: no auth on the proxy — anyone with the URL spends the host's key.
-// Add a shared-password env check here if that ever matters.
+// ponytail: bind to loopback via HOST=127.0.0.1 and/or set PROXY_PASSWORD so
+// network peers can't drain the host's key or use this as an open relay.
 // --- server file-storage API ------------------------------------------------
 function handleStorage(req, res, url) {
   if (!STORAGE_DIR) return reply(res, 404, JSON.stringify({ ok: false, error: 'Server storage not enabled' }))
@@ -185,6 +203,7 @@ const server = http.createServer(async (req, res) => {
       // via APERTUS_STORAGE_DIR); folder name is presentational only.
       return reply(res, 200, JSON.stringify({
         managed: !!MANAGED,
+        proxyAuth: !!PROXY_PASSWORD,
         autocomplete: MANAGED?.autocomplete.model ?? null,
         chat: MANAGED?.chat.model ?? null,
         storage: { enabled: storageEnabled, folder: storageEnabled ? path.basename(STORAGE_DIR) : null },
@@ -194,6 +213,9 @@ const server = http.createServer(async (req, res) => {
       return handleStorage(req, res, url)
     }
     if (req.method === 'POST' && url.pathname === '/api/proxy') {
+      if (!hasProxySecret(req)) {
+        return reply(res, 401, JSON.stringify({ ok: false, status: 0, statusText: 'Unauthorized', body: '' }))
+      }
       // Only the app's own pages may use the proxy (blocks other sites from
       // relaying requests through it; same-origin fetches omit Origin).
       const origin = req.headers.origin
@@ -239,7 +261,7 @@ const server = http.createServer(async (req, res) => {
   }
 })
 
-server.listen(PORT, () => console.log(`Apertus Writer web mode → http://localhost:${PORT}`))
+server.listen(PORT, HOST, () => console.log(`Apertus Writer web mode → http://${HOST || 'localhost'}:${PORT}${PROXY_PASSWORD ? ' (proxy auth enabled)' : ''}`))
 
 // Self-check for the SSRF guard logic: node server.mjs --check
 if (process.argv[2] === '--check') {
