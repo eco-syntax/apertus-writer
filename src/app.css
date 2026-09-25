@@ -158,6 +158,14 @@ body {
 .chat-sidebar { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
 .chat-controls { padding: 8px 14px; display: flex; flex-direction: column; gap: 6px; }
 .chat-ctx-toggle { font-size: 13px; display: flex; gap: 6px; align-items: center; }
+.chat-selection {
+  font-size: 12px; display: flex; gap: 6px; align-items: flex-start;
+  background: #fff8e1; border: 1px solid #eedca7; border-radius: 8px; padding: 6px 8px;
+}
+.chat-selection .selection-label { font-weight: 600; white-space: nowrap; }
+.chat-selection .selection-preview {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
 .chat-extras { padding: 0 14px 8px; display: flex; flex-wrap: wrap; gap: 6px; }
 .ctx-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .ctx-chip {
