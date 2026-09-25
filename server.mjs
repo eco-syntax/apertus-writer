@@ -31,14 +31,34 @@ const PROXY_PASSWORD = process.env.PROXY_PASSWORD
 // unreachable from a hosted browser anyway).
 // ponytail: DNS rebinding / TOCTOU between resolve and fetch remains; a full
 // fix needs an endpoint allowlist, which is a product call.
+// Extract the embedded IPv4 from the tail of an IPv4-mapped IPv6 address:
+// accepts the dotted form (`169.254.169.254`) and the two-hex-group form
+// (`a9fe:a9fe`, which is what URL.hostname normalises a mapped address to).
+// Mirrors electron/main.cjs 'embeddedIPv4'.
+function embeddedIPv4(part) {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(part)) return part
+  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(part)
+  if (!hex) return null
+  const bytes = (hex[1].padStart(4, '0') + hex[2].padStart(4, '0')).match(/../g)
+  return bytes.map((b) => parseInt(b, 16)).join('.')
+}
+
 function isPrivateIp(ip) {
-  if (ip.includes('.')) {
-    const [a, b] = ip.split('.').map(Number)
+  if (typeof ip !== 'string') return false
+  const stripped = ip.replace(/^\[|\]$/g, '').toLowerCase()
+  // IPv4-mapped IPv6 (`::ffff:x.x.x.x` / `::ffff:a9fe:a9fe`): re-validate the
+  // embedded IPv4, closing the SSRF guard bypass that URL.hostname produces.
+  const mapped = /^::ffff:(.+)$/.exec(stripped)
+  if (mapped) {
+    const embedded = embeddedIPv4(mapped[1])
+    return embedded ? isPrivateIp(embedded) : false
+  }
+  if (stripped.includes('.')) {
+    const [a, b] = stripped.split('.').map(Number)
     return a === 0 || a === 10 || a === 127 || a >= 224 ||
       (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
   }
-  const v6 = ip.replace(/^\[|\]$/g, '').toLowerCase()
-  return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6)
+  return stripped === '::' || stripped === '::1' || /^f[cd]/.test(stripped) || /^fe[89ab]/.test(stripped)
 }
 
 async function assertSafeTarget(rawUrl) {
@@ -275,6 +295,11 @@ if (process.argv[2] === '--check') {
   assert(isPrivateIp('::1'), 'v6 loopback blocked')
   assert(isPrivateIp('fe80::1'), 'v6 link-local blocked')
   assert(isPrivateIp('fd00::1'), 'v6 unique-local blocked')
+  assert(isPrivateIp('::ffff:169.254.169.254'), 'mapped v4 metadata blocked')
+  assert(isPrivateIp('::ffff:a9fe:a9fe'), 'mapped hex metadata blocked')
+  assert(isPrivateIp('::ffff:0a00:0001'), 'mapped 10/8 blocked')
+  assert(isPrivateIp('::ffff:7f00:0001'), 'mapped loopback blocked')
+  assert(!isPrivateIp('::ffff:0808:0808'), 'mapped public v4 allowed')
   assert(!isPrivateIp('8.8.8.8'), 'public v4 allowed')
   assert(!isPrivateIp('172.32.0.1'), '172.32 is public')
   assert(!isPrivateIp('2606:4700::1'), 'public v6 allowed')
